@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useLocation } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import { api } from "../api";
 import ChatMessenger from "../pages/ChatMessenger";
@@ -12,14 +13,17 @@ const FloatingChatIcon = () => (
   </svg>
 );
 
-export default function ChatWidget() {
+export default function ChatWidget({ hideLauncher = false }: { hideLauncher?: boolean }) {
   const { user, loading } = useAuth();
+  const location = useLocation();
   const [open, setOpen] = useState(false);
   const [openTarget, setOpenTarget] = useState<{ userId?: number; username?: string; nonce: number } | null>(null);
   const [unreadCount, setUnreadCount] = useState(0);
   const [mounted, setMounted] = useState(false);
-  const [readVersion, setReadVersion] = useState(0);
   const [lastUnreadMessageText, setLastUnreadMessageText] = useState<string>("");
+  const lastPublishedRef = useRef<{ unreadCount: number; lastMessageText: string } | null>(null);
+  const prevUnreadCountRef = useRef<number | null>(null);
+  const BROWSER_CHAT_NOTIFY_KEY = "chat_browser_notifications_enabled";
 
   useEffect(() => {
     const onClose = () => setOpen(false);
@@ -42,36 +46,38 @@ export default function ChatWidget() {
     };
   }, []);
 
-  const READ_GENERAL_AT_KEY = "chat_read_general_at";
-  const READ_PRIVATE_AT_PREFIX = "chat_read_private_at_";
-  const READ_GROUP_AT_PREFIX = "chat_read_group_at_";
-
-  const safeSetTs = (key: string, ts: number) => {
-    try {
-      localStorage.setItem(key, String(ts));
-    } catch {
-      // ignore write errors (private mode / disabled storage)
-    }
-  };
-
-  const setAllRead = (privateDialogs: { id: number }[], groupDialogs: { id: number }[]) => {
-    const now = Date.now();
-    safeSetTs(READ_GENERAL_AT_KEY, now);
-    privateDialogs.forEach((d) => safeSetTs(`${READ_PRIVATE_AT_PREFIX}${d.id}`, now));
-    groupDialogs.forEach((d) => safeSetTs(`${READ_GROUP_AT_PREFIX}${d.id}`, now));
-  };
-
   const publishNotificationState = (count: number, messageText: string) => {
+    const normalizedCount = Math.max(0, count);
+    const normalizedText = messageText || "";
     const payload = {
-      unreadCount: Math.max(0, count),
-      lastMessageText: messageText || "",
+      unreadCount: normalizedCount,
+      lastMessageText: normalizedText,
     };
+    const prev = lastPublishedRef.current;
+    if (prev && prev.unreadCount === payload.unreadCount && prev.lastMessageText === payload.lastMessageText) {
+      return;
+    }
+    lastPublishedRef.current = payload;
     (window as any).__crmChatNotify = payload;
     window.dispatchEvent(new CustomEvent("crm-chat-notify", { detail: payload }));
   };
 
   const fetchUnread = async () => {
     if (!user) return;
+    if (user.chat_notifications_enabled === false) {
+      setUnreadCount(0);
+      setLastUnreadMessageText("");
+      publishNotificationState(0, "");
+      return;
+    }
+    // Полноэкранный /chat: сообщения просматриваются в ChatMessenger; не публикуем
+    // устаревший счётчик в window.__crmChatNotify — иначе APK-пулл снова показывает уведомления.
+    if (location.pathname === "/chat") {
+      setUnreadCount(0);
+      setLastUnreadMessageText("");
+      publishNotificationState(0, "");
+      return;
+    }
     try {
       const summary = await api.chat.notificationsSummary();
       const count = Number(summary?.unread_count ?? 0);
@@ -91,22 +97,24 @@ export default function ChatWidget() {
 
   useEffect(() => {
     if (loading || !user) return;
+    if (user.chat_notifications_enabled === false) {
+      setUnreadCount(0);
+      setLastUnreadMessageText("");
+      publishNotificationState(0, "");
+      return;
+    }
+    if (location.pathname === "/chat") {
+      setUnreadCount(0);
+      setLastUnreadMessageText("");
+      publishNotificationState(0, "");
+    }
+  }, [location.pathname, loading, user?.id, user?.chat_notifications_enabled]);
+
+  useEffect(() => {
+    if (loading || !user) return;
     if (open) {
-      // когда открыли — считаем все прочитанным
-      (async () => {
-        try {
-          const dialogs = await api.chat.privateDialogs.list();
-          const groupDialogs = await api.chat.groupDialogs.list();
-          setAllRead(dialogs, groupDialogs);
-          setReadVersion((v) => v + 1);
-        } catch {
-          safeSetTs(READ_GENERAL_AT_KEY, Date.now());
-        } finally {
-          setUnreadCount(0);
-          setLastUnreadMessageText("");
-          publishNotificationState(0, "");
-        }
-      })();
+      // Важно: открытие панели чата не должно автоматически читать все диалоги.
+      // Прочтение выполняется только внутри ChatMessenger для реально открытого чата.
       return;
     }
 
@@ -115,12 +123,44 @@ export default function ChatWidget() {
     const id = window.setInterval(fetchUnread, 6000);
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, loading, user?.id]);
+  }, [open, loading, user?.id, user?.chat_notifications_enabled, location.pathname]);
 
   useEffect(() => {
     publishNotificationState(unreadCount, lastUnreadMessageText);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unreadCount, lastUnreadMessageText]);
+
+  useEffect(() => {
+    if (!user || user.chat_notifications_enabled === false) {
+      prevUnreadCountRef.current = unreadCount;
+      return;
+    }
+    const prev = prevUnreadCountRef.current;
+    prevUnreadCountRef.current = unreadCount;
+    if (prev == null) return;
+    if (unreadCount <= prev) return;
+    if (open || location.pathname === "/chat") return;
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+    if (Notification.permission !== "granted") return;
+    let enabled = false;
+    try {
+      enabled = localStorage.getItem(BROWSER_CHAT_NOTIFY_KEY) === "1";
+    } catch {
+      enabled = false;
+    }
+    if (!enabled) return;
+    if (document.visibilityState === "visible") return;
+    const body = lastUnreadMessageText?.trim() || "Новое сообщение";
+    const notif = new Notification("Mosoptika: новое сообщение в чате", {
+      body,
+      tag: "crm-chat",
+    });
+    notif.onclick = () => {
+      window.focus();
+      window.dispatchEvent(new CustomEvent("chatwidget:open", { detail: {} }));
+      notif.close();
+    };
+  }, [unreadCount, lastUnreadMessageText, open, location.pathname, user]);
 
   const unreadBadgeText = useMemo(() => {
     if (unreadCount <= 0) return "";
@@ -132,43 +172,45 @@ export default function ChatWidget() {
 
   const widget = (
     <>
-      <button
-        type="button"
-        aria-label="Открыть чат"
-        onClick={() => setOpen(true)}
-        className="chat-widget-button fixed z-[60] w-14 h-14 rounded-3xl flex items-center justify-center text-white shadow-elevated animate-chat-bubble relative"
-        style={{
-          right: 16,
-          bottom: 24,
-          left: "auto",
-          background: "linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%)",
-          boxShadow: "0 10px 30px rgba(0, 82, 204, 0.25)",
-          border: "1px solid rgba(255,255,255,0.15)",
-        }}
-      >
-        <FloatingChatIcon />
+      {!hideLauncher && (
+        <button
+          type="button"
+          aria-label="Открыть чат"
+          onClick={() => setOpen(true)}
+          className="chat-widget-button fixed z-[80] w-14 h-14 rounded-3xl flex items-center justify-center text-white shadow-elevated animate-chat-bubble relative"
+          style={{
+            right: 16,
+            bottom: 24,
+            left: "auto",
+            background: "linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%)",
+            boxShadow: "0 10px 30px rgba(0, 82, 204, 0.25)",
+            border: "1px solid rgba(255,255,255,0.15)",
+          }}
+        >
+          <FloatingChatIcon />
 
-        {unreadCount > 0 && (
-          <span
-            aria-hidden
-            className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-[4px] rounded-full flex items-center justify-center text-[11px] font-bold"
-            style={{
-              backgroundColor: "#ef4444",
-              color: "#fff",
-              border: "2px solid var(--bg-primary)",
-              boxShadow: "0 6px 18px rgba(239,68,68,0.35)",
-              transform: "translateZ(0)",
-            }}
-          >
-            {unreadBadgeText}
-          </span>
-        )}
-      </button>
+          {user.chat_notifications_enabled !== false && unreadCount > 0 && (
+            <span
+              aria-hidden
+              className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-[4px] rounded-full flex items-center justify-center text-[11px] font-bold"
+              style={{
+                backgroundColor: "#ef4444",
+                color: "#fff",
+                border: "2px solid var(--bg-primary)",
+                boxShadow: "0 6px 18px rgba(239,68,68,0.35)",
+                transform: "translateZ(0)",
+              }}
+            >
+              {unreadBadgeText}
+            </span>
+          )}
+        </button>
+      )}
 
       {open && (
         <>
           <div
-            className="fixed inset-0 z-[55]"
+            className="fixed inset-0 z-[85]"
             style={{
               backgroundColor: "rgba(0,0,0,0.35)",
               backdropFilter: "blur(6px)",
@@ -176,10 +218,10 @@ export default function ChatWidget() {
             onClick={() => setOpen(false)}
           />
           <div
-            className="chat-widget-panel fixed z-[60] top-0 right-0 bottom-0 overflow-hidden"
+            className="chat-widget-panel fixed z-[90] top-0 right-0 bottom-0 flex flex-col overflow-hidden min-h-0"
             style={{
-              width: "95vw",
-              maxWidth: "560px",
+              width: "50vw",
+              maxWidth: "50vw",
               backgroundColor: "var(--bg-secondary)",
               borderLeft: "1px solid var(--border)",
               right: 0,
@@ -190,7 +232,7 @@ export default function ChatWidget() {
             }}
           >
             <div
-              className="flex items-center justify-between p-2 sm:p-4"
+              className="flex flex-shrink-0 items-center justify-between p-2 sm:p-4"
               style={{
                 borderBottom: "1px solid var(--border)",
                 backgroundColor: "var(--bg-secondary)",
@@ -217,8 +259,8 @@ export default function ChatWidget() {
               </button>
             </div>
 
-            <div className="h-full animate-slide-in">
-              <ChatMessenger readVersion={readVersion} openPrivateTarget={openTarget} />
+            <div className="flex-1 min-h-0 flex flex-col animate-slide-in overflow-hidden">
+              <ChatMessenger openPrivateTarget={openTarget} />
             </div>
           </div>
         </>

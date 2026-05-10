@@ -1,0 +1,381 @@
+@import "tailwindcss";
+
+/* Современная SaaS цветовая схема */
+:root {
+  /* Светлая тема - чистая и воздушная */
+  --bg-primary: #ffffff;
+  --bg-primary-rgb: 255, 255, 255;
+  --bg-secondary: #fafbfc;
+  --bg-tertiary: #f4f5f7;
+  --text-primary: #172b4d;
+  --text-secondary: #5e6c84;
+  --text-tertiary: #8993a4;
+  --accent: #0052cc;
+  --accent-hover: #0747a6;
+  --accent-light: #deebff;
+  --border: #dfe1e6;
+  --border-color: #dfe1e6;
+  --shadow: rgba(9, 30, 66, 0.08);
+  --shadow-elevated: 0 4px 20px rgba(9, 30, 66, 0.12);
+  --success: #00875a;
+  --error: #de350b;
+  --warning: #ff991f;
+  
+  /* Дополнительные цвета */
+  --purple: #6554c0;
+  --teal: #00b8d9;
+  --green: #36b37e;
+}
+
+html.dark {
+  /* Темная тема - современная */
+  --bg-primary: #1d2125;
+  --bg-primary-rgb: 29, 33, 37;
+  --bg-secondary: #22272b;
+  --bg-tertiary: #2c333a;
+  --text-primary: #b6c2cf;
+  --text-secondary: #8c9bab;
+  --text-tertiary: #626f86;
+  --accent: #579dff;
+  --accent-hover: #85b8ff;
+  --accent-light: rgba(87, 157, 255, 0.15);
+  --border: #38414a;
+  --border-color: #38414a;
+  --shadow: rgba(0, 0, 0, 0.5);
+  --shadow-elevated: 0 4px 20px rgba(0, 0, 0, 0.35);
+  --success: #4bce97;
+  --error: #f87168;
+  --warning: #e2b203;
+  
+  --purple: #9f8fef;
+  --teal: #6cc3e0;
+  --green: #7ee2b8;
+}
+
+body {
+  @apply antialiased min-h-screen;
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  letter-spacing: -0.01em;
+}
+
+/* Скроллбар в стиле Telegram */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--text-tertiary);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
+
+/* Анимации */
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-slide-in {
+  animation: slideIn 0.2s ease-out;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.animate-pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* Улучшенные тени */
+.shadow-elegant {
+  box-shadow: 0 2px 8px var(--shadow);
+}
+
+.shadow-elevated {
+  box-shadow: 0 4px 16px var(--shadow);
+}
+
+/* Анимация блика */
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%) translateY(-100%) rotate(45deg);
+  }
+  100% {
+    transform: translateX(100%) translateY(100%) rotate(45deg);
+  }
+}
+
+/* Анимация плавающих градиентов */
+@keyframes float {
+  0%, 100% {
+    transform: translate(0, 0) scale(1);
+  }
+  33% {
+    transform: translate(30px, -30px) scale(1.1);
+  }
+  66% {
+    transform: translate(-20px, 20px) scale(0.9);
+  }
+}
+
+/* Telegram-like: максимально мягкое "приподнятие" без разлёта по X */
+@keyframes chatBubbleFloat {
+  0%, 100% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-6px) scale(1.02);
+  }
+}
+
+.animate-float-slow {
+  animation: float 20s ease-in-out infinite;
+}
+
+.animate-float-medium {
+  animation: float 15s ease-in-out infinite;
+}
+
+.animate-float-fast {
+  animation: float 12s ease-in-out infinite;
+}
+
+.animate-chat-bubble {
+  animation: chatBubbleFloat 2.8s ease-in-out infinite;
+}
+
+/* ChatWidget hard positioning.
+   Some pages/layouts can accidentally affect fixed positioning via containing blocks. */
+.chat-widget-button {
+  position: fixed !important;
+  right: 16px !important;
+  bottom: calc(24px + env(safe-area-inset-bottom, 0px)) !important;
+  left: auto !important;
+}
+
+.chat-widget-panel {
+  position: fixed !important;
+  right: 0 !important;
+  left: auto !important;
+  top: 0 !important;
+  bottom: 0 !important;
+}
+
+/* Safe-area offsets for chat overlay content */
+html.app-apk .chat-widget-panel {
+  padding-top: env(safe-area-inset-top, 0px) !important;
+  padding-bottom: env(safe-area-inset-bottom, 0px) !important;
+}
+
+/* Desktop: expanded chat takes half viewport width */
+@media (min-width: 1024px) {
+  .chat-widget-panel {
+    width: 50vw !important;
+    max-width: 50vw !important;
+  }
+}
+
+/* Mobile: open chat and member panel as full-screen */
+@media (max-width: 640px) {
+  .chat-list-mobile-header {
+    padding-top: calc(10px + env(safe-area-inset-top, 0px)) !important;
+  }
+
+  .chat-dialog-mobile-header {
+    padding-top: calc(8px + env(safe-area-inset-top, 0px)) !important;
+  }
+
+  .chat-list-mobile-scroll {
+    padding-top: 10px !important;
+    /* Скролл списка чатов в WebView / iOS (нужен явный слой прокрутки + touch) */
+    -webkit-overflow-scrolling: touch !important;
+    touch-action: pan-y !important;
+    overscroll-behavior: contain !important;
+  }
+
+  .chat-widget-panel {
+    left: 0 !important;
+    right: 0 !important;
+    width: 100vw !important;
+    max-width: none !important;
+    border-left: none !important;
+    border-top-left-radius: 0 !important;
+    border-bottom-left-radius: 0 !important;
+    padding-top: calc(6px + env(safe-area-inset-top, 0px)) !important;
+    padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)) !important;
+  }
+
+  .group-members-modal {
+    left: 0 !important;
+    right: 0 !important;
+    width: 100vw !important;
+    max-width: none !important;
+    border-left: none !important;
+    padding-top: calc(4px + env(safe-area-inset-top, 0px)) !important;
+    padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)) !important;
+  }
+}
+
+/* iOS Safari fix: keep date input inside container width */
+.return-date-input {
+  width: 100% !important;
+  width: -webkit-fill-available !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+  box-sizing: border-box !important;
+  display: block !important;
+}
+
+.return-date-input::-webkit-date-and-time-value {
+  min-width: 0;
+}
+
+.return-date-input::-webkit-datetime-edit {
+  min-width: 0;
+  padding: 0;
+}
+
+.return-date-input::-webkit-datetime-edit-fields-wrapper {
+  min-width: 0;
+}
+
+.return-date-input::-webkit-calendar-picker-indicator {
+  margin: 0;
+}
+
+/* Safe-area spacing for mobile/app shells (status bar + system navigation). */
+html.app-apk .app-main-header {
+  padding-top: calc(8px + env(safe-area-inset-top, 0px)) !important;
+  min-height: calc(64px + env(safe-area-inset-top, 0px));
+  height: auto !important;
+}
+
+html.app-apk main.flex-1.overflow-auto > .relative.z-10 {
+  padding-top: calc(28px + env(safe-area-inset-top, 0px)) !important;
+  padding-bottom: calc(44px + env(safe-area-inset-bottom, 0px)) !important;
+}
+
+@media (max-width: 768px) {
+  /* Mobile: move sidebar menu lower and increase spacing */
+  aside nav {
+    padding-top: 12px !important;
+  }
+
+  aside nav > div {
+    margin-bottom: 8px;
+  }
+
+  aside nav a,
+  aside nav button {
+    padding-top: 14px !important;
+    padding-bottom: 14px !important;
+  }
+
+  html.app-apk main.flex-1.overflow-auto > .relative.z-10 {
+    padding-top: calc(26px + env(safe-area-inset-top, 0px)) !important;
+    padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px)) !important;
+  }
+
+  /* Also apply on mobile web/PWA without native APK marker class. */
+  main.flex-1.overflow-auto > .relative.z-10 {
+    padding-top: calc(18px + env(safe-area-inset-top, 0px));
+    padding-bottom: calc(28px + env(safe-area-inset-bottom, 0px));
+  }
+
+}
+
+/* Плитки прайса: число колонок на широком экране из настройки группы (--pricelist-tile-cols, 1–48) */
+.pricelist-tiles-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(1, minmax(0, 1fr));
+}
+@media (min-width: 640px) {
+  .pricelist-tiles-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (min-width: 1280px) {
+  .pricelist-tiles-grid {
+    grid-template-columns: repeat(var(--pricelist-tile-cols, 4), minmax(0, 1fr));
+  }
+}
+
+/* Полное описание прайса RX (Markdown: таблицы, списки) */
+.pricelist-md {
+  overflow-x: auto;
+}
+.pricelist-md p {
+  margin: 0.5rem 0;
+}
+.pricelist-md p:first-child {
+  margin-top: 0;
+}
+.pricelist-md p:last-child {
+  margin-bottom: 0;
+}
+.pricelist-md ul,
+.pricelist-md ol {
+  margin: 0.5rem 0;
+  padding-left: 1.25rem;
+}
+.pricelist-md table,
+.pricelist-user-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.75rem 0;
+  font-size: 0.875rem;
+}
+.pricelist-md th,
+.pricelist-md td,
+.pricelist-user-table th,
+.pricelist-user-table td {
+  border: 1px solid var(--border);
+  padding: 0.5rem 0.65rem;
+  text-align: left;
+  vertical-align: top;
+}
+.pricelist-md th {
+  background: var(--bg-tertiary);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.pricelist-md strong {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.pricelist-md hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 0.75rem 0;
+}
+.pricelist-md blockquote {
+  margin: 0.5rem 0;
+  padding-left: 0.75rem;
+  border-left: 3px solid var(--accent);
+  color: var(--text-secondary);
+}

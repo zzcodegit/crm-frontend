@@ -7,6 +7,16 @@ const PRICELIST_OFFLINE_ASSETS_STORE = "assets";
 const resolvedAssetObjectUrlCache = new Map<string, string>();
 const resolveAssetPromiseCache = new Map<string, Promise<string>>();
 
+export class ApiHttpError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiHttpError";
+    this.status = status;
+  }
+}
+
 function getToken(): string | null {
   return localStorage.getItem("token");
 }
@@ -45,11 +55,11 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
   if (res.status === 401) {
     localStorage.removeItem("token");
-    throw new Error("Неверный логин или пароль");
+    throw new ApiHttpError(401, "Неверный логин или пароль");
   }
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(formatApiDetail(data));
+    throw new ApiHttpError(res.status, formatApiDetail(data));
   }
   if (res.status === 204) return undefined as T;
   const text = await res.text();
@@ -439,11 +449,11 @@ async function requestMultipart<T>(path: string, formData: FormData, options: Re
   const res = await fetch(`${API_BASE}${path}`, { ...options, method: options.method || "POST", body: formData, headers });
   if (res.status === 401) {
     localStorage.removeItem("token");
-    throw new Error("Неверный логин или пароль");
+    throw new ApiHttpError(401, "Неверный логин или пароль");
   }
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(formatApiDetail(data));
+    throw new ApiHttpError(res.status, formatApiDetail(data));
   }
   if (res.status === 204) return undefined as T;
   return res.json();
@@ -668,6 +678,8 @@ export interface CentralCashPayoutItem {
   paid_to_user_id: number;
   paid_to_name: string;
   amount: number;
+  taken_source_id?: number | null;
+  taken_source_name?: string | null;
   note?: string | null;
   recorded_by_user_id?: number | null;
   recorded_by_name: string;
@@ -779,6 +791,7 @@ export interface DebtSummaryRow {
   status: "open" | "taken" | string;
   debt_source?: string;
   manual_debt_id?: number | null;
+  one_c_exchange_log_id?: number | null;
   admin_note?: string | null;
   take_events?: DebtTakeEventItem[];
 }
@@ -914,6 +927,7 @@ export interface PricelistItemResponse {
   /** Не показывать загруженные фото на странице карточки товара */
   hide_photo?: boolean;
   enable_transposition_calc?: boolean;
+  admin_only?: boolean;
 }
 
 export interface PricelistPublicationJobItem {
@@ -1666,6 +1680,7 @@ export const api = {
         created_at?: string | null;
       }>("/reports/debts/manual", { method: "POST", body: JSON.stringify(d) }),
     deleteManualDebt: (id: number) => request(`/reports/debts/manual/${id}`, { method: "DELETE" }),
+    deleteOneCDebtLog: (id: number) => request(`/reports/debts/one-c/${id}`, { method: "DELETE" }),
     /** Корректировка ручной записи; при сумме 0 и отсутствии зачётов — удаление (204). */
     updateManualDebt: (
       id: number,
@@ -1735,7 +1750,7 @@ export const api = {
   },
   centralCashPayouts: {
     list: () => request<CentralCashPayoutItem[]>("/central-cash-payouts"),
-    create: (d: { paid_to_user_id: number; amount: number; note?: string | null }) =>
+    create: (d: { paid_to_user_id: number; amount: number; taken_source_id?: number | null; note?: string | null }) =>
       request<CentralCashPayoutItem>("/central-cash-payouts", { method: "POST", body: JSON.stringify(d) }),
     delete: (id: number) => request<void>(`/central-cash-payouts/${id}`, { method: "DELETE" }),
   },
@@ -1865,15 +1880,65 @@ export const api = {
         doneFiles += sidebarVideo.saved ? 1 : 0;
         toDownloadFiles += sidebarVideo.saved ? 1 : 0;
       }
+      notify("PDF каталоги поставщиков");
+      const baseDone = doneFiles;
+      const baseTotal = totalFiles;
+      const baseToDownload = toDownloadFiles;
+      const baseBytes = downloadedBytes;
+      const manufacturerPdfs = await api.pricelistOffline.syncManufacturerCatalogPdfs((s) => {
+        doneFiles = baseDone + s.done;
+        totalFiles = baseTotal + s.total;
+        toDownloadFiles = baseToDownload + s.toDownload;
+        downloadedBytes = baseBytes + s.downloadedBytes;
+        notify(`PDF поставщиков: ${s.done}/${s.total}`);
+      });
       notify("Готово");
-      return { warehouse, rx, mkl, sidebarVideo, progress: { doneFiles, totalFiles, toDownloadFiles, downloadedBytes } };
+      return { warehouse, rx, mkl, sidebarVideo, manufacturerPdfs, progress: { doneFiles, totalFiles, toDownloadFiles, downloadedBytes } };
     },
     syncAll: async () => {
       const warehouse = await api.pricelistOffline.syncCatalog("warehouse");
       const rx = await api.pricelistOffline.syncCatalog("rx");
       const mkl = await api.pricelistOffline.syncCatalog("mkl");
       const sidebarVideo = await api.pricelistOffline.syncSidebarVideo();
-      return { warehouse, rx, mkl, sidebarVideo };
+      const manufacturerPdfs = await api.pricelistOffline.syncManufacturerCatalogPdfs();
+      return { warehouse, rx, mkl, sidebarVideo, manufacturerPdfs };
+    },
+    syncManufacturerCatalogPdfs: async (
+      onProgress?: (p: { done: number; total: number; toDownload: number; downloadedBytes: number }) => void
+    ) => {
+      let done = 0;
+      let total = 0;
+      let saved = 0;
+      let toDownload = 0;
+      let downloadedBytes = 0;
+      const list = await request<ManufacturerItem[]>("/ref/manufacturers");
+      const urls = Array.from(
+        new Set(
+          (list || [])
+            .map((m) => (m.catalog_pdf_url || "").trim())
+            .filter((u) => !!u)
+        )
+      );
+      total = urls.length;
+      for (const url of urls) {
+        const existing = await readCachedAssetBlob(normalizeAssetUrl(url));
+        if (!existing) toDownload += 1;
+      }
+      onProgress?.({ done, total, toDownload, downloadedBytes });
+      for (const url of urls) {
+        const res = await cacheAssetUrl(url);
+        if (res.ok) saved += 1;
+        downloadedBytes += res.downloadedBytes;
+        done += 1;
+        onProgress?.({ done, total, toDownload, downloadedBytes });
+      }
+      return {
+        total,
+        saved,
+        toDownload,
+        downloadedBytes,
+        updated_at: new Date().toISOString(),
+      };
     },
     syncSidebarVideo: async () => {
       try {
@@ -1993,29 +2058,29 @@ export const api = {
       delete: (id: number) => request(`/ref/pricelist-mkl-groups/${id}`, { method: "DELETE" }),
     },
     pricelist: {
-      create: (d: { manufacturer_id: number; lens_name: string; description?: string; full_description?: string; barcode?: string; barcodes?: { code: string; price?: number; description?: string }[]; barcode_sections?: { name?: string | null; items: { code: string; price?: number; description?: string }[] }[]; photo_url?: string; photo_urls?: string[]; sph?: string; cyl?: string; step?: string; diameters?: string; price: number; sort_index?: number; price_from?: boolean; is_promo?: boolean; uv_protection?: boolean; material?: string | null; lens_id?: number; group: string; coefficient?: string; feature_ids?: number[]; feature_colors?: Record<string, string[]>; custom_values?: Record<string, string | string[] | boolean | null>; hide_detail_link?: boolean; hide_photo?: boolean; enable_transposition_calc?: boolean; publish_mode?: "now" | "schedule"; publish_at?: string | null }) =>
+      create: (d: { manufacturer_id: number; lens_name: string; description?: string; full_description?: string; barcode?: string; barcodes?: { code: string; price?: number; description?: string }[]; barcode_sections?: { name?: string | null; items: { code: string; price?: number; description?: string }[] }[]; photo_url?: string; photo_urls?: string[]; sph?: string; cyl?: string; step?: string; diameters?: string; price: number; sort_index?: number; price_from?: boolean; is_promo?: boolean; uv_protection?: boolean; material?: string | null; lens_id?: number; group: string; coefficient?: string; feature_ids?: number[]; feature_colors?: Record<string, string[]>; custom_values?: Record<string, string | string[] | boolean | null>; hide_detail_link?: boolean; hide_photo?: boolean; enable_transposition_calc?: boolean; admin_only?: boolean; publish_mode?: "now" | "schedule"; publish_at?: string | null }) =>
         request<PricelistItemResponse>("/ref/pricelist", { method: "POST", body: JSON.stringify(d) }),
       bulkCreate: (items: any[]) =>
         request<PricelistItemResponse[]>("/ref/pricelist/bulk", { method: "POST", body: JSON.stringify({ items }) }),
-      update: (id: number, d: { manufacturer_id?: number; lens_name?: string; description?: string | null; full_description?: string | null; barcode?: string; barcodes?: { code: string; price?: number; description?: string }[]; barcode_sections?: { name?: string | null; items: { code: string; price?: number; description?: string }[] }[]; photo_url?: string; photo_urls?: string[]; sph?: string; cyl?: string; step?: string; diameters?: string; price?: number; sort_index?: number; price_from?: boolean; is_promo?: boolean; uv_protection?: boolean; material?: string | null; lens_id?: number | null; group?: string; coefficient?: string | null; feature_ids?: number[]; feature_colors?: Record<string, string[]>; custom_values?: Record<string, string | string[] | boolean | null>; hide_detail_link?: boolean; hide_photo?: boolean; enable_transposition_calc?: boolean; publish_mode?: "now" | "schedule"; publish_at?: string | null }) =>
+      update: (id: number, d: { manufacturer_id?: number; lens_name?: string; description?: string | null; full_description?: string | null; barcode?: string; barcodes?: { code: string; price?: number; description?: string }[]; barcode_sections?: { name?: string | null; items: { code: string; price?: number; description?: string }[] }[]; photo_url?: string; photo_urls?: string[]; sph?: string; cyl?: string; step?: string; diameters?: string; price?: number; sort_index?: number; price_from?: boolean; is_promo?: boolean; uv_protection?: boolean; material?: string | null; lens_id?: number | null; group?: string; coefficient?: string | null; feature_ids?: number[]; feature_colors?: Record<string, string[]>; custom_values?: Record<string, string | string[] | boolean | null>; hide_detail_link?: boolean; hide_photo?: boolean; enable_transposition_calc?: boolean; admin_only?: boolean; publish_mode?: "now" | "schedule"; publish_at?: string | null }) =>
         request<PricelistItemResponse>(`/ref/pricelist/${id}`, { method: "PATCH", body: JSON.stringify(d) }),
       delete: (id: number) => request(`/ref/pricelist/${id}`, { method: "DELETE" }),
     },
     pricelistRx: {
-      create: (d: { manufacturer_id: number; lens_name: string; description?: string; full_description?: string; barcode?: string; barcodes?: { code: string; price?: number; description?: string }[]; barcode_sections?: { name?: string | null; items: { code: string; price?: number; description?: string }[] }[]; photo_url?: string; photo_urls?: string[]; sph?: string; cyl?: string; step?: string; diameters?: string; price: number; sort_index?: number; price_from?: boolean; is_promo?: boolean; uv_protection?: boolean; material?: string | null; lens_id?: number; group: string; coefficient?: string; feature_ids?: number[]; feature_colors?: Record<string, string[]>; custom_values?: Record<string, string | string[] | boolean | null>; hide_detail_link?: boolean; hide_photo?: boolean; enable_transposition_calc?: boolean; publish_mode?: "now" | "schedule"; publish_at?: string | null }) =>
+      create: (d: { manufacturer_id: number; lens_name: string; description?: string; full_description?: string; barcode?: string; barcodes?: { code: string; price?: number; description?: string }[]; barcode_sections?: { name?: string | null; items: { code: string; price?: number; description?: string }[] }[]; photo_url?: string; photo_urls?: string[]; sph?: string; cyl?: string; step?: string; diameters?: string; price: number; sort_index?: number; price_from?: boolean; is_promo?: boolean; uv_protection?: boolean; material?: string | null; lens_id?: number; group: string; coefficient?: string; feature_ids?: number[]; feature_colors?: Record<string, string[]>; custom_values?: Record<string, string | string[] | boolean | null>; hide_detail_link?: boolean; hide_photo?: boolean; enable_transposition_calc?: boolean; admin_only?: boolean; publish_mode?: "now" | "schedule"; publish_at?: string | null }) =>
         request<PricelistItemResponse>("/ref/pricelist-rx", { method: "POST", body: JSON.stringify(d) }),
       bulkCreate: (items: any[]) =>
         request<PricelistItemResponse[]>("/ref/pricelist-rx/bulk", { method: "POST", body: JSON.stringify({ items }) }),
-      update: (id: number, d: { manufacturer_id?: number; lens_name?: string; description?: string | null; full_description?: string | null; barcode?: string; barcodes?: { code: string; price?: number; description?: string }[]; barcode_sections?: { name?: string | null; items: { code: string; price?: number; description?: string }[] }[]; photo_url?: string; photo_urls?: string[]; sph?: string; cyl?: string; step?: string; diameters?: string; price?: number; sort_index?: number; price_from?: boolean; is_promo?: boolean; uv_protection?: boolean; material?: string | null; lens_id?: number | null; group?: string; coefficient?: string | null; feature_ids?: number[]; feature_colors?: Record<string, string[]>; custom_values?: Record<string, string | string[] | boolean | null>; hide_detail_link?: boolean; hide_photo?: boolean; enable_transposition_calc?: boolean; publish_mode?: "now" | "schedule"; publish_at?: string | null }) =>
+      update: (id: number, d: { manufacturer_id?: number; lens_name?: string; description?: string | null; full_description?: string | null; barcode?: string; barcodes?: { code: string; price?: number; description?: string }[]; barcode_sections?: { name?: string | null; items: { code: string; price?: number; description?: string }[] }[]; photo_url?: string; photo_urls?: string[]; sph?: string; cyl?: string; step?: string; diameters?: string; price?: number; sort_index?: number; price_from?: boolean; is_promo?: boolean; uv_protection?: boolean; material?: string | null; lens_id?: number | null; group?: string; coefficient?: string | null; feature_ids?: number[]; feature_colors?: Record<string, string[]>; custom_values?: Record<string, string | string[] | boolean | null>; hide_detail_link?: boolean; hide_photo?: boolean; enable_transposition_calc?: boolean; admin_only?: boolean; publish_mode?: "now" | "schedule"; publish_at?: string | null }) =>
         request<PricelistItemResponse>(`/ref/pricelist-rx/${id}`, { method: "PATCH", body: JSON.stringify(d) }),
       delete: (id: number) => request(`/ref/pricelist-rx/${id}`, { method: "DELETE" }),
     },
     pricelistMkl: {
-      create: (d: { manufacturer_id: number; lens_name: string; description?: string; full_description?: string; barcode?: string; barcodes?: { code: string; price?: number; description?: string }[]; barcode_sections?: { name?: string | null; items: { code: string; price?: number; description?: string }[] }[]; photo_url?: string; photo_urls?: string[]; sph?: string; cyl?: string; step?: string; diameters?: string; price: number; sort_index?: number; price_from?: boolean; is_promo?: boolean; uv_protection?: boolean; material?: string | null; lens_id?: number; group: string; coefficient?: string; feature_ids?: number[]; feature_colors?: Record<string, string[]>; custom_values?: Record<string, string | string[] | boolean | null>; hide_detail_link?: boolean; hide_photo?: boolean; enable_transposition_calc?: boolean; publish_mode?: "now" | "schedule"; publish_at?: string | null }) =>
+      create: (d: { manufacturer_id: number; lens_name: string; description?: string; full_description?: string; barcode?: string; barcodes?: { code: string; price?: number; description?: string }[]; barcode_sections?: { name?: string | null; items: { code: string; price?: number; description?: string }[] }[]; photo_url?: string; photo_urls?: string[]; sph?: string; cyl?: string; step?: string; diameters?: string; price: number; sort_index?: number; price_from?: boolean; is_promo?: boolean; uv_protection?: boolean; material?: string | null; lens_id?: number; group: string; coefficient?: string; feature_ids?: number[]; feature_colors?: Record<string, string[]>; custom_values?: Record<string, string | string[] | boolean | null>; hide_detail_link?: boolean; hide_photo?: boolean; enable_transposition_calc?: boolean; admin_only?: boolean; publish_mode?: "now" | "schedule"; publish_at?: string | null }) =>
         request<PricelistItemResponse>("/ref/pricelist-mkl", { method: "POST", body: JSON.stringify(d) }),
       bulkCreate: (items: any[]) =>
         request<PricelistItemResponse[]>("/ref/pricelist-mkl/bulk", { method: "POST", body: JSON.stringify({ items }) }),
-      update: (id: number, d: { manufacturer_id?: number; lens_name?: string; description?: string | null; full_description?: string | null; barcode?: string; barcodes?: { code: string; price?: number; description?: string }[]; barcode_sections?: { name?: string | null; items: { code: string; price?: number; description?: string }[] }[]; photo_url?: string; photo_urls?: string[]; sph?: string; cyl?: string; step?: string; diameters?: string; price?: number; sort_index?: number; price_from?: boolean; is_promo?: boolean; uv_protection?: boolean; material?: string | null; lens_id?: number | null; group?: string; coefficient?: string | null; feature_ids?: number[]; feature_colors?: Record<string, string[]>; custom_values?: Record<string, string | string[] | boolean | null>; hide_detail_link?: boolean; hide_photo?: boolean; enable_transposition_calc?: boolean; publish_mode?: "now" | "schedule"; publish_at?: string | null }) =>
+      update: (id: number, d: { manufacturer_id?: number; lens_name?: string; description?: string | null; full_description?: string | null; barcode?: string; barcodes?: { code: string; price?: number; description?: string }[]; barcode_sections?: { name?: string | null; items: { code: string; price?: number; description?: string }[] }[]; photo_url?: string; photo_urls?: string[]; sph?: string; cyl?: string; step?: string; diameters?: string; price?: number; sort_index?: number; price_from?: boolean; is_promo?: boolean; uv_protection?: boolean; material?: string | null; lens_id?: number | null; group?: string; coefficient?: string | null; feature_ids?: number[]; feature_colors?: Record<string, string[]>; custom_values?: Record<string, string | string[] | boolean | null>; hide_detail_link?: boolean; hide_photo?: boolean; enable_transposition_calc?: boolean; admin_only?: boolean; publish_mode?: "now" | "schedule"; publish_at?: string | null }) =>
         request<PricelistItemResponse>(`/ref/pricelist-mkl/${id}`, { method: "PATCH", body: JSON.stringify(d) }),
       delete: (id: number) => request(`/ref/pricelist-mkl/${id}`, { method: "DELETE" }),
     },
@@ -2039,6 +2104,15 @@ export const api = {
         return request<PricelistPublicationJobItem[]>(`/ref/pricelist-publications/publish-all-now${qs}`, { method: "POST" });
       },
       cancel: (jobId: number) => request(`/ref/pricelist-publications/${jobId}`, { method: "DELETE" }),
+      cancelMany: (jobIds: number[]) =>
+        request<PricelistPublicationJobItem[]>("/ref/pricelist-publications/cancel-many", {
+          method: "POST",
+          body: JSON.stringify({ job_ids: jobIds }),
+        }),
+      cancelBatch: (batchCode: string) =>
+        request<PricelistPublicationJobItem[]>(`/ref/pricelist-publications/batches/${encodeURIComponent(batchCode)}/cancel`, {
+          method: "POST",
+        }),
     },
     customFields: {
       list: () => request<CustomFieldItem[]>("/ref/custom-fields"),
