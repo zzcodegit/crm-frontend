@@ -106,9 +106,9 @@ export default function App() {
         <Route path="orders/:id" element={<OrderDetail />} />
         <Route path="drive" element={<Drive />} />
         <Route path="drive/view/:id" element={<DriveFileView />} />
-        <Route path="lens-catalog" element={<AdminOnly><LensCatalog /></AdminOnly>} />
-        <Route path="lens-catalog/pdf" element={<AdminOnly><LensCatalogPdfPage /></AdminOnly>} />
-        <Route path="lens-catalog/:id" element={<AdminOnly><LensDetail /></AdminOnly>} />
+        <Route path="lens-catalog" element={<LensCatalog />} />
+        <Route path="lens-catalog/pdf" element={<LensCatalogPdfPage />} />
+        <Route path="lens-catalog/:id" element={<LensDetail />} />
         <Route path="pricelist" element={<Pricelist />} />
         <Route path="pricelist/new" element={<AdminOnly><PricelistCreate /></AdminOnly>} />
         <Route path="pricelist/:id/edit" element={<AdminOnly><PricelistEdit /></AdminOnly>} />

@@ -8,7 +8,7 @@ import { useTheme } from "../contexts/ThemeContext";
 import { usePageTitle } from "../contexts/PageTitleContext";
 import Sidebar from "./Sidebar";
 import ChatWidget from "./ChatWidget";
-import { isNativeAppShell } from "../utils/nativeApp";
+import { isNativeAppShell, isNativeShellRetailPath } from "../utils/nativeApp";
 
 const PRICELIST_SCROLL_KEYS: Record<string, string> = {
   "/pricelist": "pricelist-scroll",
@@ -179,7 +179,16 @@ export default function Layout() {
   }, [location.pathname, location.hash]);
 
 
+  if (!isPathAllowed(location.pathname)) {
+    return <Navigate to={firstAllowedPath} replace />;
+  }
+  if (isNativeAppShell() && !isNativeShellRetailPath(location.pathname)) {
+    const candidates = ["/", "/lens-catalog", "/pricelist", "/pricelist-rx", "/pricelist-mkl"] as const;
+    const fallback = candidates.find((p) => isPathAllowed(p)) ?? "/pricelist";
+    return <Navigate to={fallback} replace />;
+  }
   if (
+    !isNativeAppShell() &&
     user?.role === "manager" &&
     location.pathname !== "/orders" &&
     !location.pathname.startsWith("/orders/") &&
@@ -190,9 +199,6 @@ export default function Layout() {
     !location.pathname.startsWith("/chat")
   ) {
     return <Navigate to="/orders" replace />;
-  }
-  if (!isPathAllowed(location.pathname)) {
-    return <Navigate to={firstAllowedPath} replace />;
   }
 
   return (

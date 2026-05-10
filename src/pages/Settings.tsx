@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
 import { useTheme } from "../contexts/ThemeContext";
 import { useAuth } from "../contexts/AuthContext";
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { api, type MobileClientRow } from "../api";
 
 const DEFAULT_SIDEBAR_MENU_ORDER = [
   "/",
@@ -57,19 +57,13 @@ export default function Settings() {
   const [sidebarMenuOrderError, setSidebarMenuOrderError] = useState<string | null>(null);
   const [allGroups, setAllGroups] = useState<{ id: number; name: string }[]>([]);
   const [activeExportType, setActiveExportType] = useState<"all" | "warehouse" | "rx" | "mkl" | null>(null);
-  const [offlineSyncLoading, setOfflineSyncLoading] = useState(false);
-  const [offlineSyncError, setOfflineSyncError] = useState<string | null>(null);
-  const [offlineSyncMessage, setOfflineSyncMessage] = useState<string | null>(null);
-  const [offlineSyncProgress, setOfflineSyncProgress] = useState<{
-    stage: string;
-    doneFiles: number;
-    totalFiles: number;
-    toDownloadFiles: number;
-    downloadedBytes: number;
-  } | null>(null);
   const [browserChatNotifyEnabled, setBrowserChatNotifyEnabled] = useState(false);
   const [browserChatNotifyPermission, setBrowserChatNotifyPermission] = useState<NotificationPermission | "unsupported">("unsupported");
   const [browserChatNotifyError, setBrowserChatNotifyError] = useState<string | null>(null);
+  const [mobileClients, setMobileClients] = useState<MobileClientRow[]>([]);
+  const [mobileClientsLoading, setMobileClientsLoading] = useState(false);
+  const [mobileClientsError, setMobileClientsError] = useState<string | null>(null);
+  const [mobileClientDeletingId, setMobileClientDeletingId] = useState<number | null>(null);
 
   const BROWSER_CHAT_NOTIFY_KEY = "chat_browser_notifications_enabled";
 
@@ -120,27 +114,6 @@ export default function Settings() {
     } finally {
       setExportLoading(false);
       setActiveExportType(null);
-    }
-  };
-
-  const syncPricelistOfflineData = async () => {
-    setOfflineSyncLoading(true);
-    setOfflineSyncError(null);
-    setOfflineSyncMessage(null);
-    setOfflineSyncProgress(null);
-    try {
-      const result = await api.pricelistOffline.syncAllWithProgress((p) => {
-        setOfflineSyncProgress(p);
-      });
-      setOfflineSyncMessage(
-        `Офлайн-данные обновлены: склад ${result.warehouse.count} (${result.warehouse.assets} фото), RX ${result.rx.count} (${result.rx.assets} фото), MKL ${result.mkl.count} (${result.mkl.assets} фото), видео сайдбара: ${result.sidebarVideo.saved ? "сохранено" : "нет/не сохранено"}. Загружено: ${Math.round((result.progress.downloadedBytes || 0) / 1024 / 1024 * 10) / 10} МБ.`
-      );
-    } catch (err) {
-      setOfflineSyncError(
-        err instanceof Error ? err.message : "Не удалось обновить офлайн-данные. Проверьте интернет и попробуйте снова."
-      );
-    } finally {
-      setOfflineSyncLoading(false);
     }
   };
 
@@ -226,8 +199,42 @@ export default function Settings() {
     }
   };
 
+  const loadMobileClients = async () => {
+    if (!user?.is_admin) return;
+    setMobileClientsLoading(true);
+    setMobileClientsError(null);
+    try {
+      const rows = await api.listMobileClients();
+      setMobileClients(Array.isArray(rows) ? rows : []);
+    } catch (err) {
+      setMobileClientsError(err instanceof Error ? err.message : "Не удалось загрузить список устройств");
+      setMobileClients([]);
+    } finally {
+      setMobileClientsLoading(false);
+    }
+  };
+
+  const deleteMobileClientRow = async (id: number) => {
+    if (!user?.is_admin) return;
+    setMobileClientDeletingId(id);
+    setMobileClientsError(null);
+    try {
+      await api.deleteMobileClientRow(id);
+      setMobileClients((prev) => prev.filter((r) => r.id !== id));
+    } catch (err) {
+      setMobileClientsError(err instanceof Error ? err.message : "Не удалось удалить запись");
+    } finally {
+      setMobileClientDeletingId(null);
+    }
+  };
+
   useEffect(() => {
     void loadSidebarVideoSettings();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.is_admin]);
+
+  useEffect(() => {
+    if (user?.is_admin) void loadMobileClients();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.is_admin]);
 
@@ -612,6 +619,119 @@ export default function Settings() {
           </section>
         )}
 
+        {user?.is_admin && (
+          <section id="mobile-app-clients">
+            <h2 className="text-xs font-medium mb-3" style={{ color: "var(--text-secondary)" }}>
+              Мобильные приложения
+            </h2>
+            <div
+              className="rounded-lg p-5 overflow-x-auto"
+              style={{
+                backgroundColor: "var(--bg-primary)",
+                border: "1px solid var(--border)",
+              }}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                <div>
+                  <div className="font-medium mb-1" style={{ color: "var(--text-primary)" }}>
+                    Устройства и версии
+                  </div>
+                  <div className="text-xs" style={{ color: "var(--text-secondary)" }}>
+                    Регистрация при открытии APK и после входа в CRM в WebView. Колонка «Пользователь» заполняется только при&nbsp;реальном входе на&nbsp;сервер (при интернете); в&nbsp;чистом офлайне используется локальный токен без привязки к аккаунту. Для строки «crm-webview» версия APP/CRM — номер веб-сборки с&nbsp;сайта.
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void loadMobileClients()}
+                  disabled={mobileClientsLoading}
+                  className="px-4 py-2 rounded-md text-sm font-medium shrink-0"
+                  style={{
+                    backgroundColor: mobileClientsLoading ? "var(--bg-secondary)" : "var(--accent)",
+                    color: mobileClientsLoading ? "var(--text-secondary)" : "#fff",
+                    border: `1px solid ${mobileClientsLoading ? "var(--border)" : "var(--accent)"}`,
+                  }}
+                >
+                  {mobileClientsLoading ? "Загрузка…" : "Обновить"}
+                </button>
+              </div>
+              {mobileClientsError && (
+                <div className="text-sm mb-3" style={{ color: "var(--error)" }}>
+                  {mobileClientsError}
+                </div>
+              )}
+              {!mobileClientsLoading && mobileClients.length === 0 && !mobileClientsError ? (
+                <div className="text-sm" style={{ color: "var(--text-secondary)" }}>
+                  Пока нет данных — откройте приложение на устройстве с интернетом.
+                </div>
+              ) : null}
+              {mobileClients.length > 0 ? (
+                <div className="overflow-x-auto min-w-0">
+                  <table className="w-full text-xs border-collapse">
+                    <thead>
+                      <tr style={{ borderBottom: "1px solid var(--border)", color: "var(--text-secondary)" }}>
+                        <th className="text-left py-2 pr-3 font-medium">Пользователь</th>
+                        <th className="text-left py-2 pr-3 font-medium">Приложение</th>
+                        <th className="text-left py-2 pr-3 font-medium">APP / CRM</th>
+                        <th className="text-left py-2 pr-3 font-medium">OTA</th>
+                        <th className="text-left py-2 pr-3 font-medium">Офлайн JSON</th>
+                        <th className="text-left py-2 pr-3 font-medium">Платформа</th>
+                        <th className="text-left py-2 pr-3 font-medium">Устройство</th>
+                        <th className="text-left py-2 pr-3 font-medium">Последний визит</th>
+                        <th className="text-right py-2 pl-2 font-medium w-24"> </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {mobileClients.map((row) => (
+                        <tr key={row.id} style={{ borderBottom: "1px solid var(--border)", color: "var(--text-primary)" }}>
+                          <td className="py-2 pr-3 align-top whitespace-nowrap">{row.username ?? "—"}</td>
+                          <td className="py-2 pr-3 align-top">{row.app_slug}</td>
+                          <td className="py-2 pr-3 align-top whitespace-nowrap">
+                            {[row.native_version, row.native_build != null ? `#${row.native_build}` : ""].filter(Boolean).join(" ") || "—"}
+                          </td>
+                          <td className="py-2 pr-3 align-top max-w-[140px] truncate" title={row.bundle_version ?? ""}>
+                            {row.bundle_version ?? "—"}
+                          </td>
+                          <td className="py-2 pr-3 align-top max-w-[120px] truncate" title={row.offline_data_version ?? ""}>
+                            {row.offline_data_version ?? "—"}
+                          </td>
+                          <td className="py-2 pr-3 align-top whitespace-nowrap">
+                            {[row.platform, row.os_version].filter(Boolean).join(" ") || "—"}
+                          </td>
+                          <td className="py-2 pr-3 align-top max-w-[160px] truncate" title={[row.device_manufacturer, row.device_model].filter(Boolean).join(" ") || ""}>
+                            {[row.device_manufacturer, row.device_model].filter(Boolean).join(" ") || "—"}
+                          </td>
+                          <td className="py-2 pr-3 align-top whitespace-nowrap text-[11px]" style={{ color: "var(--text-secondary)" }}>
+                            {row.last_seen_at
+                              ? new Date(row.last_seen_at).toLocaleString("ru-RU", {
+                                  day: "2-digit",
+                                  month: "2-digit",
+                                  year: "numeric",
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                })
+                              : "—"}
+                          </td>
+                          <td className="py-2 pl-2 align-top text-right">
+                            <button
+                              type="button"
+                              className="text-[11px] underline decoration-dotted disabled:opacity-50"
+                              style={{ color: "var(--text-tertiary)" }}
+                              disabled={mobileClientDeletingId === row.id}
+                              onClick={() => void deleteMobileClientRow(row.id)}
+                            >
+                              {mobileClientDeletingId === row.id ? "…" : "Удалить"}
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
+            </div>
+          </section>
+        )}
+
         <section>
           <h2 className="text-xs font-medium mb-3" style={{ color: 'var(--text-secondary)' }}>
             Внешний вид
@@ -769,7 +889,7 @@ export default function Settings() {
                 Скачать ZIP для офлайн-работы в APK: склад, RX, MKL или общий архив.
               </div>
               <div className="text-xs mb-3" style={{ color: "var(--text-secondary)" }}>
-                Для работы без интернета нажмите «Обновить офлайн-данные»: прайсы сохранятся в память устройства (APK/WebView).
+                Обновление кэша прайсов на устройстве — на главной приложения (кнопка «Обновить данные»).
               </div>
               <div className="flex flex-wrap gap-2">
                 <button
@@ -812,60 +932,10 @@ export default function Settings() {
                 >
                   MKL
                 </button>
-                <button
-                  type="button"
-                  onClick={() => void syncPricelistOfflineData()}
-                  disabled={offlineSyncLoading}
-                  className="px-4 py-2 rounded-md text-sm font-medium"
-                  style={{
-                    backgroundColor: offlineSyncLoading ? "var(--bg-secondary)" : "var(--accent-light)",
-                    color: offlineSyncLoading ? "var(--text-secondary)" : "var(--accent)",
-                    border: "1px solid var(--border)",
-                  }}
-                >
-                  {offlineSyncLoading ? "Обновление..." : "Обновить офлайн-данные"}
-                </button>
               </div>
               {exportError && (
                 <div className="text-xs mt-2" style={{ color: "var(--error)" }}>
                   {exportError}
-                </div>
-              )}
-              {offlineSyncError && (
-                <div className="text-xs mt-2" style={{ color: "var(--error)" }}>
-                  {offlineSyncError}
-                </div>
-              )}
-              {offlineSyncLoading && offlineSyncProgress && (
-                <div className="mt-2 rounded-md p-2" style={{ backgroundColor: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
-                  <div className="text-xs mb-1" style={{ color: "var(--text-secondary)" }}>
-                    {offlineSyncProgress.stage}
-                  </div>
-                  <div className="w-full h-2 rounded-full overflow-hidden" style={{ backgroundColor: "var(--border)" }}>
-                    <div
-                      className="h-full"
-                      style={{
-                        width:
-                          offlineSyncProgress.totalFiles > 0
-                            ? `${Math.min(100, Math.round((offlineSyncProgress.doneFiles / offlineSyncProgress.totalFiles) * 100))}%`
-                            : "0%",
-                        backgroundColor: "var(--accent)",
-                        transition: "width 0.2s ease",
-                      }}
-                    />
-                  </div>
-                  <div className="text-xs mt-1" style={{ color: "var(--text-tertiary)" }}>
-                    Файлы: {offlineSyncProgress.doneFiles}/{offlineSyncProgress.totalFiles || "?"}
-                    {" · "}
-                    Нужно скачать: {offlineSyncProgress.toDownloadFiles}
-                    {" · "}
-                    Загружено: {Math.round((offlineSyncProgress.downloadedBytes || 0) / 1024 / 1024 * 10) / 10} МБ
-                  </div>
-                </div>
-              )}
-              {offlineSyncMessage && (
-                <div className="text-xs mt-2" style={{ color: "var(--text-secondary)" }}>
-                  {offlineSyncMessage}
                 </div>
               )}
             </div>

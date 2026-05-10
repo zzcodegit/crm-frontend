@@ -486,6 +486,37 @@ export interface SidebarVideoSettings {
 export interface SidebarMenuOrderSettings {
   order: string[];
 }
+
+/** Регистрация мобильного клиента (POST /api/mobile/clients/ping). */
+export interface MobileClientPingPayload {
+  device_id: string;
+  app_slug?: string;
+  native_version?: string | null;
+  native_build?: number | null;
+  bundle_version?: string | null;
+  offline_data_version?: string | null;
+  platform?: string;
+  os_version?: string | null;
+  device_model?: string | null;
+  device_manufacturer?: string | null;
+}
+
+export interface MobileClientRow {
+  id: number;
+  device_id: string;
+  username: string | null;
+  app_slug: string;
+  native_version: string | null;
+  native_build: number | null;
+  bundle_version: string | null;
+  offline_data_version: string | null;
+  platform: string;
+  os_version: string | null;
+  device_model: string | null;
+  device_manufacturer: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+}
 export type GroupPermissionsResponse = {
   permissions: Record<string, string[]>;
 };
@@ -1393,6 +1424,11 @@ export const api = {
     }),
   clearReportsTableColumnsMine: () =>
     request<{ ok: boolean }>("/settings/reports-table-columns/mine", { method: "DELETE" }),
+  pingMobileClient: (body: MobileClientPingPayload) =>
+    request<{ ok: boolean }>("/mobile/clients/ping", { method: "POST", body: JSON.stringify(body) }),
+  listMobileClients: () => request<MobileClientRow[]>("/settings/mobile-clients"),
+  deleteMobileClientRow: (id: number) =>
+    request<{ ok: boolean }>(`/settings/mobile-clients/${id}`, { method: "DELETE" }),
   portalTasks: {
     list: () => request<PortalTaskItem[]>("/portal-tasks"),
     assignees: () => request<TaskAssigneeOption[]>("/portal-tasks/assignees"),

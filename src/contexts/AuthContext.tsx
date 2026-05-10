@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, useCallback } from "react";
 import { api, ApiHttpError } from "../api";
+import { scheduleMobileClientPing } from "../utils/mobileClientPing";
 
 type User = {
   id: number;
@@ -60,6 +61,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (!token) {
       setUser(null);
       setLoading(false);
+      scheduleMobileClientPing();
       return;
     }
     try {
@@ -77,6 +79,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     } finally {
       setLoading(false);
+      scheduleMobileClientPing();
     }
   }, []);
 
@@ -90,6 +93,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const me = await api.getMe();
       setUser(me);
       writeCachedUser(me);
+      scheduleMobileClientPing();
     } catch (err) {
       if (err instanceof ApiHttpError && err.status === 401) {
         localStorage.removeItem("token");
@@ -112,6 +116,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const me = await api.getMe();
     setUser(me);
     writeCachedUser(me);
+    scheduleMobileClientPing();
   }, []);
 
   const logout = useCallback(() => {
@@ -126,6 +131,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const me = await api.getMe();
     setUser(me);
     writeCachedUser(me);
+    scheduleMobileClientPing();
   }, []);
 
   return (

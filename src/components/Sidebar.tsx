@@ -6,6 +6,9 @@ import { api, type PricelistGroupItem, type UserItem } from "../api";
 import type { SectionKey } from "../permissions";
 import { isNativeAppShell } from "../utils/nativeApp";
 
+/** В APK показываем только главную и три прайса (без заказов, чата, настроек и т.д.). */
+const NATIVE_SHELL_NAV_PATHS = new Set(["/", "/lens-catalog", "/pricelist", "/pricelist-rx", "/pricelist-mkl"]);
+
 // Профессиональные SVG иконки
 const HomeIcon = (_props: { isActive: boolean }) => (
   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -376,11 +379,13 @@ export default function Sidebar({
   const bySectionAccess = (item: (typeof navItems)[number]) => !item.sectionKey || isSectionAllowed(item.sectionKey);
   const groupsByPath = (path: string) =>
     path === "/pricelist" ? pricelistGroupsWarehouse : path === "/pricelist-rx" ? pricelistGroupsRx : pricelistGroupsMkl;
-  const itemsRaw = isManagerOnly
+  const inNativeShell = isNativeAppShell();
+  const itemsRawBase = isManagerOnly
     ? navItems.filter(
         (i) =>
           (i.to === "/orders" ||
             i.to === "/drive" ||
+            i.to === "/lens-catalog" ||
             i.to === "/pricelist" ||
             i.to === "/pricelist-rx" ||
             i.to === "/pricelist-mkl" ||
@@ -391,6 +396,7 @@ export default function Sidebar({
           bySectionAccess(i)
       )
     : navItems.filter((i) => (!i.adminOnly || isAdmin) && bySectionAccess(i));
+  const itemsRaw = inNativeShell ? itemsRawBase.filter((i) => NATIVE_SHELL_NAV_PATHS.has(i.to)) : itemsRawBase;
   const sidebarOrderMap = new Map(sidebarMenuOrder.map((to, index) => [to, index]));
   const items = [...itemsRaw].sort((a, b) => {
     const ia = sidebarOrderMap.get(a.to) ?? Number.MAX_SAFE_INTEGER;
@@ -400,6 +406,7 @@ export default function Sidebar({
   });
   const userGroupIds = user?.group_ids ?? [];
   const canShowSidebarVideo =
+    !inNativeShell &&
     !!sidebarVideoUrl &&
     sidebarVideoGroupIds.length > 0 &&
     userGroupIds.some((gid) => sidebarVideoGroupIds.includes(gid));
@@ -687,7 +694,7 @@ export default function Sidebar({
         )}
 
         {/* Footer — профиль + уведомления (чат); в APK скрыто */}
-        {!isNativeAppShell() ? (
+        {!inNativeShell ? (
           <div className={`shrink-0 p-2 ${narrow ? "flex justify-center" : "p-3"}`} style={{ borderTop: '1px solid var(--border)' }}>
             <div
               role="button"
