@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import { usePermissions } from "../contexts/PermissionsContext";
 import { api, type PricelistGroupItem, type UserItem } from "../api";
 import type { SectionKey } from "../permissions";
 import { isNativeAppShell } from "../utils/nativeApp";
+import { apkFullOfflineSync } from "../utils/apkFullOfflineSync";
 
 /** В APK показываем только главную и три прайса (без заказов, чата, настроек и т.д.). */
 const NATIVE_SHELL_NAV_PATHS = new Set(["/", "/lens-catalog", "/pricelist", "/pricelist-rx", "/pricelist-mkl"]);
@@ -216,6 +217,21 @@ export default function Sidebar({
   const [resolvedSidebarVideoUrl, setResolvedSidebarVideoUrl] = useState<string | null>(null);
   const [sidebarVideoGroupIds, setSidebarVideoGroupIds] = useState<number[]>([]);
   const [sidebarMenuOrder, setSidebarMenuOrder] = useState<string[]>(DEFAULT_SIDEBAR_MENU_ORDER);
+  const [apkSyncBusy, setApkSyncBusy] = useState(false);
+  const [apkSyncErr, setApkSyncErr] = useState<string | null>(null);
+
+  const runNativeApkSync = useCallback(async () => {
+    setApkSyncBusy(true);
+    setApkSyncErr(null);
+    try {
+      await apkFullOfflineSync();
+    } catch (e) {
+      setApkSyncErr(e instanceof Error ? e.message : "Не удалось обновить данные");
+    } finally {
+      setApkSyncBusy(false);
+    }
+  }, []);
+
   useEffect(() => {
     const onScrollGroup = (ev: Event) => {
       const d = (ev as CustomEvent<{ basePath?: string; groupName?: string | null }>).detail;
@@ -655,6 +671,54 @@ export default function Sidebar({
             </div>
           )}
         </nav>
+
+        {inNativeShell ? (
+          <div
+            className={`shrink-0 px-2 md:px-3 py-3 ${narrow ? "flex justify-center" : ""}`}
+            style={{ borderTop: "1px solid var(--border)" }}
+          >
+            <button
+              type="button"
+              disabled={apkSyncBusy}
+              onClick={() => void runNativeApkSync()}
+              className={`rounded-xl text-xs font-semibold transition-all disabled:opacity-60 ${
+                narrow ? "w-12 h-12 p-0 inline-flex items-center justify-center" : "w-full px-3 py-3 min-h-[44px]"
+              }`}
+              style={{
+                color: "#ffffff",
+                background: apkSyncBusy ? "var(--bg-secondary)" : "linear-gradient(135deg, #1d4ed8 0%, #2563eb 100%)",
+                border: "1px solid transparent",
+              }}
+              title={narrow ? (apkSyncBusy ? "Обновление…" : "Обновить данные офлайн") : undefined}
+              aria-label={narrow ? "Обновить данные офлайн" : undefined}
+            >
+              {narrow ? (
+                apkSyncBusy ? (
+                  <span
+                    className="inline-block w-4 h-4 border-2 border-white/35 border-t-white rounded-full animate-spin"
+                    aria-hidden
+                  />
+                ) : (
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden>
+                    <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                    <path d="M3 3v5h5" />
+                    <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+                    <path d="M16 16h5v5" />
+                  </svg>
+                )
+              ) : apkSyncBusy ? (
+                "Обновление…"
+              ) : (
+                "Обновить данные"
+              )}
+            </button>
+            {apkSyncErr && !narrow ? (
+              <p className="text-[11px] mt-2 px-0.5 leading-snug" style={{ color: "var(--error)" }}>
+                {apkSyncErr}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
 
         {/* Кнопка сворачивания (только десктоп) */}
         {!mobile && onToggleCollapsed && (
