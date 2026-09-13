@@ -317,7 +317,70 @@ type BarcodeGroupState = { id: string; name: string; rows: BarcodeRow[] };
 
 const newBarcodeGroupId = () => `bg-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 
+const BARCODE_HEADER_RE = /^(штрих\s*код|штрихкод|barcode|code|код|ean|sku)$/i;
+
+function splitClipboardLine(line: string): string[] {
+  const raw = line.replace(/\r$/, "");
+  if (!raw.trim()) return [];
+  if (raw.includes("\t")) return raw.split("\t").map((c) => c.trim());
+  if (raw.includes(";")) return raw.split(";").map((c) => c.trim());
+  if (raw.includes(",")) return raw.split(",").map((c) => c.trim());
+  return [raw.trim()];
+}
+
+/** Разбор вставки из Excel/таблицы: кол1=ШК, кол2=цена, кол3+=описание. */
+function parseBarcodesFromClipboard(text: string): BarcodeRow[] {
+  const lines = String(text || "")
+    .replace(/^\uFEFF/, "")
+    .split(/\n/)
+    .map((l) => l.replace(/\r$/, ""))
+    .filter((l) => l.trim().length > 0);
+  const out: BarcodeRow[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < lines.length; i++) {
+    const cols = splitClipboardLine(lines[i]!);
+    if (!cols.length) continue;
+    const code0 = (cols[0] || "").trim();
+    if (!code0) continue;
+    if (i === 0 && BARCODE_HEADER_RE.test(code0)) continue;
+    const key = code0.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const price = (cols[1] || "").trim();
+    const description = cols.length > 2 ? cols.slice(2).join(" ").trim() : "";
+    out.push({ code: code0, price, description });
+  }
+  return out;
+}
+
+function mergeBarcodeRows(
+  existing: BarcodeRow[],
+  incoming: BarcodeRow[],
+): { rows: BarcodeRow[]; added: number; skipped: number } {
+  const kept = existing.filter(
+    (r) => (r.code || "").trim() || (r.price || "").trim() || (r.description || "").trim(),
+  );
+  const seen = new Set(kept.map((r) => r.code.trim().toLowerCase()).filter(Boolean));
+  let added = 0;
+  let skipped = 0;
+  const next = [...kept];
+  for (const row of incoming) {
+    const key = row.code.trim().toLowerCase();
+    if (!key) continue;
+    if (seen.has(key)) {
+      skipped += 1;
+      continue;
+    }
+    seen.add(key);
+    next.push({ code: row.code.trim(), price: row.price.trim(), description: row.description.trim() });
+    added += 1;
+  }
+  if (next.length === 0) next.push({ code: "", price: "", description: "" });
+  return { rows: next, added, skipped };
+}
+
 type MultiSelectTemplateEntry = { id: number; text: string };
+
 
 function tryParseMultiSelectTemplateEntry(s: string): MultiSelectTemplateEntry | null {
   const v = (s || "").trim();
@@ -399,13 +462,44 @@ function BarcodeRows({
   inputStyle: React.CSSProperties;
   showLabel?: boolean;
 }) {
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteText, setPasteText] = useState("");
+  const [pasteInfo, setPasteInfo] = useState("");
+
   const setRow = (index: number, field: keyof BarcodeRow, value: string) => {
     const next = rows.map((r, i) => (i === index ? { ...r, [field]: value } : r));
     onChange(next);
   };
   const addRow = () => onChange([...rows, { code: "", price: "", description: "" }]);
   const removeRow = (index: number) => onChange(rows.filter((_, i) => i !== index));
+
+  const applyParsed = (parsed: BarcodeRow[]) => {
+    if (!parsed.length) {
+      setPasteInfo("Не найдено строк со штрихкодами");
+      return;
+    }
+    const { rows: next, added, skipped } = mergeBarcodeRows(rows, parsed);
+    onChange(next);
+    setPasteInfo(
+      skipped > 0 ? `Добавлено: ${added}, пропущено дублей: ${skipped}` : `Добавлено штрихкодов: ${added}`,
+    );
+    setPasteText("");
+    setPasteOpen(false);
+  };
+
+  const onCodePaste = (_index: number, e: React.ClipboardEvent<HTMLInputElement>) => {
+    const text = e.clipboardData.getData("text");
+    if (!text || (!text.includes("\n") && !text.includes("\t"))) return;
+    const parsed = parseBarcodesFromClipboard(text);
+    if (parsed.length === 0) return;
+    if (parsed.length === 1 && !text.includes("\n")) return;
+    e.preventDefault();
+    applyParsed(parsed);
+  };
+
   const list = rows.length === 0 ? [{ code: "", price: "", description: "" }] : rows;
+  const previewCount = pasteText.trim() ? parseBarcodesFromClipboard(pasteText).length : 0;
+
   return (
     <div>
       {showLabel ? (
@@ -417,18 +511,23 @@ function BarcodeRows({
         {list.map((row, i) => (
           <div key={i} className="flex flex-wrap gap-2 items-end">
             <div className="flex-1 min-w-[140px]">
-              <span className="block text-xs mb-1" style={{ color: "var(--text-tertiary)" }}>Штрихкод</span>
+              <span className="block text-xs mb-1" style={{ color: "var(--text-tertiary)" }}>
+                Штрихкод
+              </span>
               <input
                 type="text"
                 value={row.code}
                 onChange={(e) => setRow(i, "code", e.target.value)}
+                onPaste={(e) => onCodePaste(i, e)}
                 className="w-full px-3 py-2 rounded-xl text-sm outline-none min-w-0"
                 style={inputStyle}
                 placeholder="Код штрихкода"
               />
             </div>
             <div className="w-28">
-              <span className="block text-xs mb-1" style={{ color: "var(--text-tertiary)" }}>Цена (₽)</span>
+              <span className="block text-xs mb-1" style={{ color: "var(--text-tertiary)" }}>
+                Цена (₽)
+              </span>
               <input
                 type="text"
                 inputMode="decimal"
@@ -440,7 +539,9 @@ function BarcodeRows({
               />
             </div>
             <div className="flex-1 min-w-[180px]">
-              <span className="block text-xs mb-1" style={{ color: "var(--text-tertiary)" }}>Описание</span>
+              <span className="block text-xs mb-1" style={{ color: "var(--text-tertiary)" }}>
+                Описание
+              </span>
               <input
                 type="text"
                 value={row.description}
@@ -450,12 +551,84 @@ function BarcodeRows({
                 placeholder="Описание"
               />
             </div>
-            {(list.length > 1 || (list[0]?.code || list[0]?.price || list[0]?.description)) && (
-              <button type="button" onClick={() => removeRow(i)} className="px-2 py-2 rounded-xl text-sm shrink-0" style={{ color: "var(--text-secondary)" }} title="Удалить">−</button>
+            {(list.length > 1 || list[0]?.code || list[0]?.price || list[0]?.description) && (
+              <button
+                type="button"
+                onClick={() => removeRow(i)}
+                className="px-2 py-2 rounded-xl text-sm shrink-0"
+                style={{ color: "var(--text-secondary)" }}
+                title="Удалить"
+              >
+                −
+              </button>
             )}
           </div>
         ))}
-        <button type="button" onClick={addRow} className="text-sm" style={{ color: "var(--accent)" }}>+ Добавить штрихкод</button>
+        <div className="flex flex-wrap gap-3 items-center">
+          <button type="button" onClick={addRow} className="text-sm" style={{ color: "var(--accent)" }}>
+            + Добавить штрихкод
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setPasteOpen((v) => !v);
+              setPasteInfo("");
+            }}
+            className="text-sm"
+            style={{ color: "var(--accent)" }}
+          >
+            {pasteOpen ? "Скрыть вставку" : "Вставить из таблицы (Excel)"}
+          </button>
+          <span className="text-xs" style={{ color: "var(--text-tertiary)" }}>
+            или вставьте таблицу в поле «Штрихкод»
+          </span>
+        </div>
+        {pasteOpen ? (
+          <div
+            className="rounded-xl p-3 space-y-2"
+            style={{ border: "1px solid var(--border)", background: "var(--bg-primary)" }}
+          >
+            <p className="text-xs" style={{ color: "var(--text-secondary)" }}>
+              Скопируйте из Excel столбцы: <strong>штрихкод</strong>, цена (необяз.), описание (необяз.) — и вставьте
+              ниже (Ctrl+V).
+            </p>
+            <textarea
+              value={pasteText}
+              onChange={(e) => setPasteText(e.target.value)}
+              rows={8}
+              placeholder={"4601234567890\t1500\tSPH -1.00\n4601234567891\t1600\tSPH -1.25"}
+              className="w-full px-3 py-2 rounded-xl text-sm outline-none font-mono"
+              style={inputStyle}
+            />
+            <div className="flex flex-wrap gap-2 items-center">
+              <button
+                type="button"
+                onClick={() => applyParsed(parseBarcodesFromClipboard(pasteText))}
+                disabled={!pasteText.trim()}
+                className="px-3 py-1.5 rounded-lg text-sm font-medium text-white disabled:opacity-50"
+                style={{ background: "var(--accent)" }}
+              >
+                Добавить{previewCount > 0 ? ` (${previewCount})` : ""}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setPasteText("");
+                  setPasteInfo("");
+                }}
+                className="px-3 py-1.5 rounded-lg text-sm border"
+                style={{ borderColor: "var(--border)", color: "var(--text-secondary)" }}
+              >
+                Очистить
+              </button>
+            </div>
+          </div>
+        ) : null}
+        {pasteInfo ? (
+          <p className="text-xs" style={{ color: "var(--text-secondary)" }}>
+            {pasteInfo}
+          </p>
+        ) : null}
       </div>
     </div>
   );
@@ -490,7 +663,8 @@ function BarcodeGroupsEditor({
           Штрихкоды
         </label>
         <p className="text-xs mt-0.5" style={{ color: "var(--text-tertiary)" }}>
-          Один общий список или несколько групп с названиями. Пустое название — без заголовка на карточке.
+          Один общий список или несколько групп с названиями. Пустое название — без заголовка на карточке. Можно вставить
+          много строк из Excel (штрихкод / цена / описание).
         </p>
       </div>
       {groups.map((g, idx) => (
