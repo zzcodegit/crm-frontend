@@ -984,6 +984,11 @@ export interface TakenSummaryRow {
   linked_debt_row_uid?: string | null;
   linked_debt_report_id?: number | null;
   is_linked_debt_take: boolean;
+  /** Документ долга (1С / отчёт / ручной) */
+  debt_source_label?: string | null;
+  debt_source_kind?: string | null;
+  /** Причина долга из привязанной строки */
+  debt_reason_name?: string | null;
 }
 
 export interface EmployeeLedgerLine {
@@ -993,6 +998,13 @@ export interface EmployeeLedgerLine {
   manual_debt_id?: number | null;
   amount: number;
   description: string;
+  taken_reason_name?: string | null;
+  taken_source_name?: string | null;
+  debt_source_label?: string | null;
+  debt_source_kind?: string | null;
+  debt_reason_name?: string | null;
+  is_linked_debt_take?: boolean;
+  linked_debt_report_id?: number | null;
 }
 
 export interface EmployeeLedgerResponse {

@@ -43,6 +43,21 @@ function fmtDebtReportMonth(v?: string | null): string {
   return head || "—";
 }
 
+function ReportNumLink({ id, className }: { id: number; className?: string }) {
+  return (
+    <Link to={`/reports/${id}/edit`} className={className ?? "underline"} style={{ color: "var(--accent)" }}>
+      #{id}
+    </Link>
+  );
+}
+
+function DebtSourceKindBadge({ kind }: { kind?: string | null }) {
+  if (kind === "1c") return <>1С</>;
+  if (kind === "manual") return <>Ручной</>;
+  if (kind === "report") return <>Отчёт</>;
+  return null;
+}
+
 function takenPart(r: DebtSummaryRow): number {
   const t = r.taken_amount;
   if (t == null || Number.isNaN(t)) return 0;
@@ -322,6 +337,9 @@ export default function ReportsDebtsSummary({ consultantSelfView = false, withho
         String(r.report_id),
         r.taken_reason_name ?? "",
         r.taken_source_name ?? "",
+        r.debt_source_label ?? "",
+        r.debt_source_kind ?? "",
+        r.debt_reason_name ?? "",
         r.order_number,
         r.report_month ?? "",
         r.warehouse_name ?? "",
@@ -1416,7 +1434,9 @@ export default function ReportsDebtsSummary({ consultantSelfView = false, withho
               value={takenSearch}
               onChange={(e) => setTakenSearch(e.target.value)}
               placeholder={
-                consultantSelfView ? "Поиск: отчёт, причина, сумма…" : "Поиск: сотрудник, отчёт, причина, сумма…"
+                consultantSelfView
+                  ? "Поиск: отчёт, причина, источник, откуда взято, сумма…"
+                  : "Поиск: сотрудник, отчёт, источник, откуда взято, сумма…"
               }
               className="w-full px-3 py-2 rounded-lg border text-sm"
               style={{ borderColor: "var(--border)", background: "var(--bg-secondary)", color: "var(--text-primary)" }}
@@ -1433,14 +1453,16 @@ export default function ReportsDebtsSummary({ consultantSelfView = false, withho
           ) : (
             <>
               <div className="overflow-auto max-h-[72vh]">
-                <table className={`w-full text-sm border-collapse ${consultantSelfView ? "min-w-[980px]" : "min-w-[1200px]"}`}>
+                <table className={`w-full text-sm border-collapse ${consultantSelfView ? "min-w-[1200px]" : "min-w-[1500px]"}`}>
                   <thead className="sticky top-0 z-10">
                     <tr style={{ background: "var(--bg-secondary)", borderBottom: "1px solid var(--border)" }}>
                       <th className="text-left px-3 py-2">Дата отчёта</th>
                       {!consultantSelfView ? <th className="text-left px-3 py-2">Сотрудник</th> : null}
                       <th className="text-right px-3 py-2">Сумма</th>
                       <th className="text-left px-3 py-2">За что взято</th>
-                      <th className="text-left px-3 py-2">Откуда</th>
+                      <th className="text-left px-3 py-2">Причина долга</th>
+                      <th className="text-left px-3 py-2">Откуда взято</th>
+                      <th className="text-left px-3 py-2 min-w-[220px]">Источник</th>
                       <th className="text-left px-3 py-2">Зачёт долга</th>
                       <th className="text-left px-3 py-2">Отчёт</th>
                       <th className="text-left px-3 py-2 min-w-[160px]">Точка</th>
@@ -1461,7 +1483,31 @@ export default function ReportsDebtsSummary({ consultantSelfView = false, withho
                         ) : null}
                         <td className="px-3 py-2 text-right tabular-nums font-medium">{fmtMoney(r.amount)}</td>
                         <td className="px-3 py-2">{r.taken_reason_name || "—"}</td>
+                        <td className="px-3 py-2">{r.debt_reason_name || "—"}</td>
                         <td className="px-3 py-2">{r.taken_source_name || "—"}</td>
+                        <td className="px-3 py-2 min-w-[220px]">
+                          {r.debt_source_label ? (
+                            <>
+                              <div className="text-xs font-medium" style={{ color: "var(--text-tertiary)" }}>
+                                <DebtSourceKindBadge kind={r.debt_source_kind} />
+                              </div>
+                              <div className="whitespace-pre-wrap break-words" title={r.debt_source_label}>
+                                {r.debt_source_kind === "report" && r.linked_debt_report_id != null ? (
+                                  <>
+                                    Отчёт <ReportNumLink id={r.linked_debt_report_id} />
+                                    {r.debt_source_label.replace(/^Отчёт #\d+/, "").trim()
+                                      ? ` ${r.debt_source_label.replace(/^Отчёт #\d+/, "").trim()}`
+                                      : ""}
+                                  </>
+                                ) : (
+                                  r.debt_source_label
+                                )}
+                              </div>
+                            </>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
                         <td className="px-3 py-2">
                           {r.is_linked_debt_take ? (
                             <span className="text-xs font-medium" style={{ color: "var(--accent)" }}>
@@ -1472,19 +1518,12 @@ export default function ReportsDebtsSummary({ consultantSelfView = false, withho
                           )}
                           {r.linked_debt_report_id != null ? (
                             <div className="text-xs" style={{ color: "var(--text-tertiary)" }}>
-                              долг из отчёта #{r.linked_debt_report_id}
+                              долг из отчёта <ReportNumLink id={r.linked_debt_report_id} />
                             </div>
                           ) : null}
                         </td>
                         <td className="px-3 py-2">
-                          #{r.report_id}
-                          {!consultantSelfView ? (
-                            <div className="text-xs mt-0.5">
-                              <Link to={`/reports/${r.report_id}/edit`} className="underline" style={{ color: "var(--accent)" }}>
-                                Открыть
-                              </Link>
-                            </div>
-                          ) : null}
+                          <ReportNumLink id={r.report_id} />
                         </td>
                         <td className="px-3 py-2 min-w-[160px]">
                           <span className="font-medium" style={{ color: "var(--text-primary)" }}>
@@ -1633,12 +1672,16 @@ export default function ReportsDebtsSummary({ consultantSelfView = false, withho
                 Леджер: {ledger.user_name}
               </div>
               <div className="overflow-auto max-h-[56vh] rounded-xl border" style={{ borderColor: "var(--border)" }}>
-                <table className="w-full text-sm border-collapse min-w-[720px]">
+                <table className="w-full text-sm border-collapse min-w-[1100px]">
                   <thead>
                     <tr style={{ background: "var(--bg-secondary)", borderBottom: "1px solid var(--border)" }}>
                       <th className="text-left px-3 py-2">Когда</th>
                       <th className="text-left px-3 py-2">Тип</th>
                       <th className="text-right px-3 py-2">Сумма</th>
+                      <th className="text-left px-3 py-2">Причина долга</th>
+                      <th className="text-left px-3 py-2">Откуда взято</th>
+                      <th className="text-left px-3 py-2 min-w-[200px]">Источник</th>
+                      <th className="text-left px-3 py-2">Отчёт</th>
                       <th className="text-left px-3 py-2">Описание</th>
                     </tr>
                   </thead>
@@ -1652,10 +1695,52 @@ export default function ReportsDebtsSummary({ consultantSelfView = false, withho
                             : ln.kind === "debt_report"
                               ? "Долг (отчёт)"
                               : ln.kind === "taken"
-                                ? "Взято"
+                                ? ln.is_linked_debt_take
+                                  ? "Взято — зачёт"
+                                  : "Взято"
                                 : ln.kind}
                         </td>
                         <td className="px-3 py-2 text-right tabular-nums">{fmtMoney(ln.amount)}</td>
+                        <td className="px-3 py-2">{ln.debt_reason_name || "—"}</td>
+                        <td className="px-3 py-2">
+                          {ln.kind === "taken" ? ln.taken_source_name || "—" : "—"}
+                        </td>
+                        <td className="px-3 py-2 min-w-[200px]">
+                          {ln.debt_source_label ? (
+                            <>
+                              <div className="text-xs font-medium" style={{ color: "var(--text-tertiary)" }}>
+                                <DebtSourceKindBadge kind={ln.debt_source_kind} />
+                              </div>
+                              <div className="whitespace-pre-wrap break-words" title={ln.debt_source_label}>
+                                {ln.debt_source_kind === "report" &&
+                                (ln.linked_debt_report_id != null || ln.report_id != null) &&
+                                ln.kind !== "taken" ? (
+                                  <>
+                                    Отчёт{" "}
+                                    <ReportNumLink id={ln.linked_debt_report_id ?? ln.report_id!} />
+                                    {ln.debt_source_label.replace(/^Долг в отчёте №\d+|^Отчёт #\d+/, "").trim()
+                                      ? ` ${ln.debt_source_label.replace(/^Долг в отчёте №\d+|^Отчёт #\d+/, "").trim()}`
+                                      : ""}
+                                  </>
+                                ) : ln.kind === "taken" && ln.linked_debt_report_id != null ? (
+                                  <>
+                                    {ln.debt_source_label}
+                                    <div className="text-xs mt-0.5" style={{ color: "var(--text-tertiary)" }}>
+                                      долг из отчёта <ReportNumLink id={ln.linked_debt_report_id} />
+                                    </div>
+                                  </>
+                                ) : (
+                                  ln.debt_source_label
+                                )}
+                              </div>
+                            </>
+                          ) : (
+                            "—"
+                          )}
+                        </td>
+                        <td className="px-3 py-2">
+                          {ln.report_id != null ? <ReportNumLink id={ln.report_id} /> : "—"}
+                        </td>
                         <td className="px-3 py-2">{ln.description}</td>
                       </tr>
                     ))}
