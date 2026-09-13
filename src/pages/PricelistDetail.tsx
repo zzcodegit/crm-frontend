@@ -135,6 +135,59 @@ export default function PricelistDetail() {
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [transposeOpen, setTransposeOpen] = useState(false);
   const [resolvedPhotos, setResolvedPhotos] = useState<string[]>([]);
+  const [barcodeQuery, setBarcodeQuery] = useState("");
+
+  type BarcodeDisplayEntry = { code: string; price: number | null; description: string | null };
+  type BarcodeDisplaySection = { name: string | null; entries: BarcodeDisplayEntry[] };
+
+  const barcodeDisplaySections = useMemo((): BarcodeDisplaySection[] => {
+    if (!item) return [];
+    const normalizeEntry = (b: { code: string; price?: number | null; description?: string | null } | string): BarcodeDisplayEntry =>
+      typeof b === "string"
+        ? { code: b, price: null, description: null }
+        : { code: b.code, price: b.price ?? null, description: b.description ?? null };
+    const sections =
+      item.barcode_sections && item.barcode_sections.length > 0
+        ? item.barcode_sections
+            .map((sec) => ({
+              name: sec.name?.trim() || null,
+              entries: (sec.items ?? []).map(normalizeEntry).filter((x) => x.code?.trim()),
+            }))
+            .filter((s) => s.entries.length > 0)
+        : [];
+    if (sections.length > 0) return sections;
+    const flatFromLegacy = (
+      item.barcodes && item.barcodes.length ? item.barcodes : item.barcode ? [item.barcode] : []
+    )
+      .map((b) => normalizeEntry(b as { code: string; price?: number | null; description?: string | null }))
+      .filter((x) => x.code?.trim());
+    return flatFromLegacy.length > 0 ? [{ name: null, entries: flatFromLegacy }] : [];
+  }, [item]);
+
+  const barcodeTotalCount = useMemo(
+    () => barcodeDisplaySections.reduce((n, s) => n + s.entries.length, 0),
+    [barcodeDisplaySections],
+  );
+
+  const filteredBarcodeSections = useMemo(() => {
+    const q = barcodeQuery.trim().toLowerCase();
+    if (!q) return barcodeDisplaySections;
+    return barcodeDisplaySections
+      .map((sec) => ({
+        ...sec,
+        entries: sec.entries.filter((e) => (e.description || "").toLowerCase().includes(q)),
+      }))
+      .filter((s) => s.entries.length > 0);
+  }, [barcodeDisplaySections, barcodeQuery]);
+
+  const filteredBarcodeCount = useMemo(
+    () => filteredBarcodeSections.reduce((n, s) => n + s.entries.length, 0),
+    [filteredBarcodeSections],
+  );
+
+  useEffect(() => {
+    setBarcodeQuery("");
+  }, [item?.id]);
 
   const photosAll = useMemo(() => {
     if (!item) return [];
@@ -644,38 +697,52 @@ export default function PricelistDetail() {
           </div>
         </div>
 
-        {((item.barcodes && item.barcodes.length) || item.barcode?.trim() || (item.lens_id != null && item.lens_id !== 0)) && (
+        {((item.barcodes && item.barcodes.length) || item.barcode?.trim() || (item.lens_id != null && item.lens_id !== 0) || barcodeTotalCount > 0) && (
           <div className="px-6 md:px-8 py-6" style={{ borderTop: "1px solid var(--border)" }}>
-            {(() => {
-              const normalizeEntry = (b: { code: string; price?: number | null; description?: string | null } | string) =>
-                typeof b === "string"
-                  ? { code: b, price: null as number | null, description: null as string | null }
-                  : { code: b.code, price: b.price ?? null, description: b.description ?? null };
-              const sections =
-                item.barcode_sections && item.barcode_sections.length > 0
-                  ? item.barcode_sections
-                      .map((sec) => ({
-                        name: sec.name?.trim() || null,
-                        entries: (sec.items ?? []).map(normalizeEntry).filter((x) => x.code?.trim()),
-                      }))
-                      .filter((s) => s.entries.length > 0)
-                  : [];
-              const flatFromLegacy = (item.barcodes && item.barcodes.length
-                ? item.barcodes
-                : item.barcode
-                  ? [item.barcode]
-                  : []
-              ).map((b) => normalizeEntry(b as { code: string; price?: number | null; description?: string | null })).filter((x) => x.code?.trim());
-              const displaySections =
-                sections.length > 0
-                  ? sections
-                  : flatFromLegacy.length > 0
-                    ? [{ name: null as string | null, entries: flatFromLegacy }]
-                    : [];
-              const showBarcodesBlock = displaySections.some((s) => s.entries.length > 0);
-              return showBarcodesBlock && (
-                <div className="py-2 space-y-4">
-                  {displaySections.map((sec, si) => (
+            {barcodeTotalCount > 0 && (
+              <div className="py-2 space-y-4">
+                {barcodeTotalCount > 1 ? (
+                  <div className="space-y-1.5">
+                    <label className="block text-xs font-medium" style={{ color: "var(--text-secondary)" }}>
+                      Поиск по описанию
+                    </label>
+                    <div className="flex flex-wrap gap-2 items-center">
+                      <input
+                        type="search"
+                        value={barcodeQuery}
+                        onChange={(e) => setBarcodeQuery(e.target.value)}
+                        placeholder="Параметры линзы, например: SPH -1.00"
+                        className="flex-1 min-w-[200px] px-3 py-2 rounded-xl text-sm outline-none"
+                        style={{
+                          background: "var(--bg-secondary)",
+                          border: "1px solid var(--border)",
+                          color: "var(--text-primary)",
+                        }}
+                      />
+                      {barcodeQuery.trim() ? (
+                        <button
+                          type="button"
+                          onClick={() => setBarcodeQuery("")}
+                          className="text-sm px-3 py-2 rounded-xl"
+                          style={{ color: "var(--text-secondary)" }}
+                        >
+                          Сбросить
+                        </button>
+                      ) : null}
+                    </div>
+                    <p className="text-xs" style={{ color: "var(--text-tertiary)" }}>
+                      {barcodeQuery.trim()
+                        ? `Найдено: ${filteredBarcodeCount} из ${barcodeTotalCount}`
+                        : `Всего штрихкодов: ${barcodeTotalCount}`}
+                    </p>
+                  </div>
+                ) : null}
+                {filteredBarcodeSections.length === 0 ? (
+                  <p className="text-sm py-4" style={{ color: "var(--text-secondary)" }}>
+                    Ничего не найдено
+                  </p>
+                ) : (
+                  filteredBarcodeSections.map((sec, si) => (
                     <div
                       key={si}
                       className="space-y-3 p-4 rounded-xl"
@@ -684,16 +751,31 @@ export default function PricelistDetail() {
                       {sec.name ? (
                         <div
                           className="inline-flex items-center px-3 py-1.5 rounded-lg text-sm font-semibold"
-                          style={{ background: "var(--accent-light)", color: "var(--accent)", border: "1px solid var(--accent)" }}
+                          style={{
+                            background: "var(--accent-light)",
+                            color: "var(--accent)",
+                            border: "1px solid var(--accent)",
+                          }}
                         >
                           {sec.name}
                         </div>
                       ) : null}
                       <div className="flex flex-wrap gap-3">
                         {sec.entries.map((b, i) => (
-                          <div key={`${si}-${i}`} className="flex items-center gap-6 p-4 rounded-xl" style={{ background: "var(--bg-primary)", border: "1px solid var(--border)" }}>
+                          <div
+                            key={`${si}-${i}-${b.code}`}
+                            className="flex items-center gap-6 p-4 rounded-xl"
+                            style={{ background: "var(--bg-primary)", border: "1px solid var(--border)" }}
+                          >
                             <div className="bg-white p-3 rounded-lg shrink-0">
-                              <Barcode value={b.code} width={2} height={56} fontSize={12} background="#ffffff" lineColor="#000000" />
+                              <Barcode
+                                value={b.code}
+                                width={2}
+                                height={56}
+                                fontSize={12}
+                                background="#ffffff"
+                                lineColor="#000000"
+                              />
                             </div>
                             {(b.price != null || b.description) && (
                               <div className="flex flex-col gap-1 min-w-0">
@@ -703,7 +785,10 @@ export default function PricelistDetail() {
                                   </div>
                                 )}
                                 {b.description && (
-                                  <div className="text-lg italic font-medium leading-snug whitespace-pre-wrap break-words" style={{ color: "var(--text-primary)" }}>
+                                  <div
+                                    className="text-lg italic font-medium leading-snug whitespace-pre-wrap break-words"
+                                    style={{ color: "var(--text-primary)" }}
+                                  >
                                     {b.description}
                                   </div>
                                 )}
@@ -713,11 +798,13 @@ export default function PricelistDetail() {
                         ))}
                       </div>
                     </div>
-                  ))}
-                </div>
-              );
-            })()}
-            {item.lens_id != null && item.lens_id !== 0 && <FieldRow label="ID линзы (каталог)" value={String(item.lens_id)} mono />}
+                  ))
+                )}
+              </div>
+            )}
+            {item.lens_id != null && item.lens_id !== 0 && (
+              <FieldRow label="ID линзы (каталог)" value={String(item.lens_id)} mono />
+            )}
           </div>
         )}
 
