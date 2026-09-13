@@ -6,12 +6,14 @@ export type SectionKey =
   | "pricelist"
   | "pricelistRx"
   | "pricelistMkl"
+  | "info"
   | "reports"
   | "training"
   | "normativeActs"
   | "chat"
   | "supplyTickets"
-  | "tasks";
+  | "tasks"
+  | "scheduleManagement";
 
 export interface SectionDefinition {
   key: SectionKey;
@@ -27,12 +29,14 @@ export const APP_SECTIONS: SectionDefinition[] = [
   { key: "pricelist", label: "Прайс склад", basePath: "/pricelist" },
   { key: "pricelistRx", label: "RX", basePath: "/pricelist-rx" },
   { key: "pricelistMkl", label: "Прайс МКЛ", basePath: "/pricelist-mkl" },
+  { key: "info", label: "Информация", basePath: "/info" },
   { key: "reports", label: "Отчеты", basePath: "/reports" },
   { key: "training", label: "Обучение", basePath: "/training" },
   { key: "normativeActs", label: "Нормативные акты", basePath: "/normative-acts" },
   { key: "chat", label: "Чат", basePath: "/chat" },
   { key: "supplyTickets", label: "Заявки на поставку", basePath: "/supply-tickets" },
   { key: "tasks", label: "Задачник", basePath: "/tasks" },
+  { key: "scheduleManagement", label: "График работ", basePath: "/schedule-management" },
 ];
 
 export const GROUP_PERMISSIONS_STORAGE_KEY = "group-page-permissions-v1";
@@ -71,8 +75,26 @@ export function clearPermissionsMap() {
   localStorage.removeItem(GROUP_PERMISSIONS_STORAGE_KEY);
 }
 
+export function isScheduleSectionEnabledForGroup(
+  groupPermissions: GroupPermissionsMap,
+  groupId: number
+): boolean {
+  const denied = groupPermissions[String(groupId)];
+  if (denied === undefined) return false;
+  return !denied.includes("scheduleManagement");
+}
+
 export function sectionKeyFromPath(pathname: string): SectionKey | null {
   if (pathname === "/" || pathname.startsWith("/?")) return "dashboard";
+  if (
+    pathname === "/schedule-management" ||
+    pathname.startsWith("/schedule-management/") ||
+    pathname === "/schedule-confirmations" ||
+    pathname.startsWith("/schedule-confirmations/")
+  ) {
+    return "scheduleManagement";
+  }
+  if (pathname === "/info" || pathname.startsWith("/info/")) return "info";
   const match = APP_SECTIONS.find((section) =>
     section.basePath === "/" ? pathname === "/" : pathname === section.basePath || pathname.startsWith(`${section.basePath}/`)
   );

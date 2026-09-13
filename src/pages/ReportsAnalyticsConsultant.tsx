@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { api, type ReportItem } from "../api";
+import { api, type ManualWithholdingRow, type ReportItem } from "../api";
 import { ReportsAnalyticsDateToolbar } from "../components/ReportsAnalyticsDateToolbar";
+import ReportsSubnav from "../components/ReportsSubnav";
 import { BarChartHorizontal, LineChartSeries } from "../components/ReportCharts";
 import {
   aggregateReportMoney,
@@ -29,6 +30,7 @@ export default function ReportsAnalyticsConsultant() {
   const userId = userIdParam ? parseInt(userIdParam, 10) : NaN;
 
   const [reports, setReports] = useState<ReportItem[]>([]);
+  const [withholdings, setWithholdings] = useState<ManualWithholdingRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
 
@@ -36,10 +38,14 @@ export default function ReportsAnalyticsConsultant() {
     let cancelled = false;
     setLoading(true);
     setErr("");
-    api.reports
-      .list()
-      .then((r) => {
-        if (!cancelled) setReports(r.filter((x) => !x.is_draft));
+    Promise.all([
+      api.reports.list().then((r) => r.filter((x) => !x.is_draft)),
+      api.reports.withholdingSummary().then((r) => r.rows ?? []).catch(() => [] as ManualWithholdingRow[]),
+    ])
+      .then(([r, w]) => {
+        if (cancelled) return;
+        setReports(r);
+        setWithholdings(w);
       })
       .catch((e) => {
         if (!cancelled) setErr(e instanceof Error ? e.message : "Ошибка загрузки");
@@ -51,6 +57,13 @@ export default function ReportsAnalyticsConsultant() {
       cancelled = true;
     };
   }, []);
+
+  const withholdingDayKey = (w: ManualWithholdingRow): string | null => {
+    const raw = w.created_at;
+    if (!raw) return null;
+    const d = raw.slice(0, 10);
+    return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : null;
+  };
 
   const authors = useMemo(() => {
     const map = new Map<number, string>();
@@ -79,6 +92,32 @@ export default function ReportsAnalyticsConsultant() {
     return list;
   }, [reports, cfrom, cto, userId, compareEnabled]);
 
+  const filteredWithholdings = useMemo(() => {
+    if (!Number.isFinite(userId)) return [] as ManualWithholdingRow[];
+    const list: ManualWithholdingRow[] = [];
+    for (const w of withholdings) {
+      if (w.user_id !== userId) continue;
+      const d = withholdingDayKey(w);
+      if (!d) continue;
+      if (d < from || d > to) continue;
+      list.push(w);
+    }
+    return list;
+  }, [withholdings, userId, from, to]);
+
+  const filteredWithholdingsCompare = useMemo(() => {
+    if (!compareEnabled || cfrom == null || cto == null || !Number.isFinite(userId)) return [] as ManualWithholdingRow[];
+    const list: ManualWithholdingRow[] = [];
+    for (const w of withholdings) {
+      if (w.user_id !== userId) continue;
+      const d = withholdingDayKey(w);
+      if (!d) continue;
+      if (d < cfrom || d > cto) continue;
+      list.push(w);
+    }
+    return list;
+  }, [withholdings, userId, compareEnabled, cfrom, cto]);
+
   const days = useMemo(() => enumerateDays(from, to), [from, to]);
   const daysCompare = useMemo(
     () => (compareEnabled && cfrom != null && cto != null ? enumerateDays(cfrom, cto) : []),
@@ -106,8 +145,13 @@ export default function ReportsAnalyticsConsultant() {
     for (const r of filtered) {
       const d = reportDayKey(r);
       if (!d || !mapN.has(d)) continue;
-      mapN.set(d, (mapN.get(d) ?? 0) + (Number(r.nal) || 0));
-      mapB.set(d, (mapB.get(d) ?? 0) + (Number(r.bn) || 0));
+      // В отчётах возвраты хранятся отдельно; для аналитики «нал/безнал» показываем net (минус возвраты).
+      const retN = r.has_returns ? (Number(r.return_nal) || 0) : 0;
+      const retB = r.has_returns ? (Number(r.return_bn) || 0) : 0;
+      const nalNet = (Number(r.nal) || 0) - retN;
+      const bnNet = (Number(r.bn) || 0) - retB;
+      mapN.set(d, (mapN.get(d) ?? 0) + nalNet);
+      mapB.set(d, (mapB.get(d) ?? 0) + bnNet);
     }
     return {
       nal: days.map((d) => ({ label: d, value: mapN.get(d) ?? 0 })),
@@ -140,8 +184,12 @@ export default function ReportsAnalyticsConsultant() {
     for (const r of filteredCompare) {
       const d = reportDayKey(r);
       if (!d || !mapN.has(d)) continue;
-      mapN.set(d, (mapN.get(d) ?? 0) + (Number(r.nal) || 0));
-      mapB.set(d, (mapB.get(d) ?? 0) + (Number(r.bn) || 0));
+      const retN = r.has_returns ? (Number(r.return_nal) || 0) : 0;
+      const retB = r.has_returns ? (Number(r.return_bn) || 0) : 0;
+      const nalNet = (Number(r.nal) || 0) - retN;
+      const bnNet = (Number(r.bn) || 0) - retB;
+      mapN.set(d, (mapN.get(d) ?? 0) + nalNet);
+      mapB.set(d, (mapB.get(d) ?? 0) + bnNet);
     }
     return {
       nal: daysCompare.map((d) => ({ label: d, value: mapN.get(d) ?? 0 })),
@@ -167,14 +215,7 @@ export default function ReportsAnalyticsConsultant() {
     ];
   }, [compareEnabled, byDayNalBn.nal, byDayNalBnCompare.nal, from, to, cfrom, cto]);
 
-  const bnSeriesDual = useMemo(() => {
-    if (!compareEnabled || byDayNalBn.bn.length === 0) return null;
-    const { a, b } = normalizeDailySeriesToIndex(byDayNalBn.bn, byDayNalBnCompare.bn);
-    return [
-      { name: `Безнал, ${from}—${to}`, color: "#2563eb", data: a },
-      { name: `Безнал, ${cfrom}—${cto}`, color: "#93c5fd", data: b },
-    ];
-  }, [compareEnabled, byDayNalBn.bn, byDayNalBnCompare.bn, from, to, cfrom, cto]);
+  // Безнал в графике не показываем (оставляем только нал).
 
   const revenueByPoint = useMemo(() => {
     const map = new Map<string, number>();
@@ -190,14 +231,24 @@ export default function ReportsAnalyticsConsultant() {
   const kpis = useMemo(() => {
     const n = filtered.length;
     const rev = filtered.reduce((a, r) => a + (Number(r.revenue) || 0), 0);
-    const nal = filtered.reduce((a, r) => a + (Number(r.nal) || 0), 0);
-    const bn = filtered.reduce((a, r) => a + (Number(r.bn) || 0), 0);
-    return { count: n, revenue: rev, nal, bn };
-  }, [filtered]);
+    const nal = filtered.reduce((a, r) => a + ((Number(r.nal) || 0) - (r.has_returns ? (Number(r.return_nal) || 0) : 0)), 0);
+    const bn = filtered.reduce((a, r) => a + ((Number(r.bn) || 0) - (r.has_returns ? (Number(r.return_bn) || 0) : 0)), 0);
+    const taken = filtered.reduce((a, r) => a + (Number(r.vzyala) || 0), 0);
+    const withholding = filteredWithholdings.reduce((a, r) => a + (Number(r.amount) || 0), 0);
+    return { count: n, revenue: rev, nal, bn, taken, withholding };
+  }, [filtered, filteredWithholdings]);
 
   const kpisCompare = useMemo(
-    () => (compareEnabled ? aggregateReportMoney(filteredCompare) : null),
-    [compareEnabled, filteredCompare]
+    () => {
+      if (!compareEnabled) return null;
+      const base = aggregateReportMoney(filteredCompare);
+      const taken = filteredCompare.reduce((a, r) => a + (Number(r.vzyala) || 0), 0);
+      const withholding = filteredWithholdingsCompare.reduce((a, r) => a + (Number(r.amount) || 0), 0);
+      const nal = filteredCompare.reduce((a, r) => a + ((Number(r.nal) || 0) - (r.has_returns ? (Number(r.return_nal) || 0) : 0)), 0);
+      const bn = filteredCompare.reduce((a, r) => a + ((Number(r.bn) || 0) - (r.has_returns ? (Number(r.return_bn) || 0) : 0)), 0);
+      return { ...base, nal, bn, taken, withholding };
+    },
+    [compareEnabled, filteredCompare, filteredWithholdingsCompare]
   );
 
   const setParam = (key: string, value: string | null) => {
@@ -238,6 +289,8 @@ export default function ReportsAnalyticsConsultant() {
           По автору отправленного отчёта (сотрудник, указанный в системе). Кривые выручки и структура по точкам.
         </p>
       </div>
+
+      <ReportsSubnav active="analytics-consultant" />
 
       <ReportsAnalyticsDateToolbar
         from={from}
@@ -289,6 +342,8 @@ export default function ReportsAnalyticsConsultant() {
                 { label: "Выручка, ₽", cur: kpis.revenue, prev: kpisCompare?.revenue ?? 0, money: true },
                 { label: "Наличные, ₽", cur: kpis.nal, prev: kpisCompare?.nal ?? 0, money: true },
                 { label: "Безнал, ₽", cur: kpis.bn, prev: kpisCompare?.bn ?? 0, money: true },
+                { label: "Взято, ₽", cur: kpis.taken, prev: kpisCompare?.taken ?? 0, money: true },
+                { label: "Удержание, ₽", cur: kpis.withholding, prev: kpisCompare?.withholding ?? 0, money: true },
               ] as const
             ).map((x) => {
               const fmt = (n: number) =>
@@ -331,18 +386,12 @@ export default function ReportsAnalyticsConsultant() {
             />
           )}
 
-          {nalSeriesDual && bnSeriesDual ? (
-            <>
-              <LineChartSeries title="Наличные по дням (сравнение периодов)" series={nalSeriesDual} />
-              <LineChartSeries title="Безнал по дням (сравнение периодов)" series={bnSeriesDual} />
-            </>
+          {nalSeriesDual ? (
+            <LineChartSeries title="Наличные по дням (сравнение периодов)" series={nalSeriesDual} />
           ) : (
             <LineChartSeries
-              title="Наличные и безнал по дням"
-              series={[
-                { name: "Наличные", color: "#16a34a", data: byDayNalBn.nal },
-                { name: "Безнал", color: "#2563eb", data: byDayNalBn.bn },
-              ]}
+              title="Наличные по дням"
+              series={[{ name: "Наличные", color: "#16a34a", data: byDayNalBn.nal }]}
             />
           )}
 

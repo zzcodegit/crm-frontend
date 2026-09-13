@@ -3,6 +3,12 @@ import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import type { ManufacturerItem } from "../api";
 
+function manufacturerCountryName(manufacturer: ManufacturerItem): string {
+  const c = manufacturer.country;
+  if (typeof c === "string") return c;
+  return c?.name || "";
+}
+
 export default function Manufacturers() {
   const [manufacturers, setManufacturers] = useState<ManufacturerItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -253,7 +259,7 @@ export default function Manufacturers() {
                           <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
                           <circle cx="12" cy="10" r="3"/>
                         </svg>
-                        {manufacturer.country.name}
+                        {manufacturerCountryName(manufacturer)}
                       </div>
                     )}
                     {manufacturer.description && (

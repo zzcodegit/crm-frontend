@@ -1,8 +1,40 @@
 import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { api, type ManufacturerItem } from "../api";
+import { isNativeAppShell } from "../utils/nativeApp";
+
+function useResolvedManufacturerLogos(manufacturers: ManufacturerItem[]) {
+  const [resolvedById, setResolvedById] = useState<Record<number, string>>({});
+  useEffect(() => {
+    let cancelled = false;
+    setResolvedById({});
+    manufacturers.forEach((m) => {
+      const raw = (m.image_url || "").trim();
+      if (!raw) return;
+      void (async () => {
+        try {
+          const v = await api.pricelistOffline.resolveAssetUrl(raw);
+          if (cancelled) return;
+          setResolvedById((prev) => ({ ...prev, [m.id]: v }));
+        } catch {
+          /* остаётся прямой URL */
+        }
+      })();
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [manufacturers]);
+  return (m: ManufacturerItem) => resolvedById[m.id] || (m.image_url || "").trim();
+}
 
 type ViewMode = 'grid' | 'list';
+
+function countryName(manufacturer: ManufacturerItem): string {
+  const c = manufacturer.country;
+  if (typeof c === "string") return c;
+  return c?.name || "";
+}
 
 export default function LensCatalog() {
   const [manufacturers, setManufacturers] = useState<ManufacturerItem[]>([]);
@@ -10,6 +42,18 @@ export default function LensCatalog() {
   const [error, setError] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
+  const logoSrc = useResolvedManufacturerLogos(manufacturers);
+  const inNativeShell = (() => {
+    if (isNativeAppShell()) return true;
+    if (typeof window !== "undefined" && /^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname) && window.location.protocol === "https:") {
+      return true;
+    }
+    try {
+      return typeof navigator !== "undefined" && navigator.userAgent.includes("MosoptikaPriceAPK");
+    } catch {
+      return false;
+    }
+  })();
 
   useEffect(() => {
     loadManufacturers();
@@ -46,12 +90,19 @@ export default function LensCatalog() {
       : `Открыть прайслист: ${manufacturer.name}`;
   }
 
+  function canOpenManufacturer(manufacturer: ManufacturerItem): boolean {
+    const shouldOpenPdf = (manufacturer.open_pdf_in_lens_catalog ?? true) && !!manufacturer.catalog_pdf_url;
+    // В APK карточка поставщика информативная: переход только если есть PDF.
+    if (inNativeShell) return shouldOpenPdf;
+    return true;
+  }
+
   const filteredManufacturers = manufacturers.filter((manufacturer) => {
     if (manufacturer.show_in_lens_catalog === false) return false;
     return (
       manufacturer.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       manufacturer.description?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      manufacturer.country?.name.toLowerCase().includes(searchQuery.toLowerCase())
+      countryName(manufacturer).toLowerCase().includes(searchQuery.toLowerCase())
     );
   });
 
@@ -197,19 +248,17 @@ export default function LensCatalog() {
         </div>
       ) : viewMode === 'grid' ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-          {filteredManufacturers.map((manufacturer) => (
-            <Link
-              key={manufacturer.id}
-              to={getManufacturerHref(manufacturer)}
-              target={((manufacturer.open_pdf_in_lens_catalog ?? true) && manufacturer.catalog_pdf_url) ? "_blank" : undefined}
-              rel={((manufacturer.open_pdf_in_lens_catalog ?? true) && manufacturer.catalog_pdf_url) ? "noopener noreferrer" : undefined}
-              className="group rounded-2xl overflow-hidden transition-all"
-              style={{
-                backgroundColor: 'var(--bg-primary)',
-                border: '2px solid var(--border)',
-              }}
-              title={getManufacturerTitle(manufacturer)}
-            >
+          {filteredManufacturers.map((manufacturer) => {
+            const shouldOpenPdf = (manufacturer.open_pdf_in_lens_catalog ?? true) && !!manufacturer.catalog_pdf_url;
+            const clickable = canOpenManufacturer(manufacturer);
+            const cardClass = `group rounded-2xl overflow-hidden transition-all${clickable ? "" : " cursor-default"}`;
+            const cardStyle = {
+              backgroundColor: 'var(--bg-primary)',
+              border: '2px solid var(--border)',
+            } as const;
+            const cardTitle = clickable ? getManufacturerTitle(manufacturer) : `${manufacturer.name} (информация)`;
+            const content = (
+              <>
               {/* Изображение производителя */}
               {manufacturer.image_url ? (
                 <div 
@@ -217,7 +266,7 @@ export default function LensCatalog() {
                   style={{ backgroundColor: 'var(--bg-secondary)' }}
                 >
                   <img 
-                    src={manufacturer.image_url} 
+                    src={logoSrc(manufacturer)} 
                     alt={manufacturer.name}
                     className="w-full h-full object-contain p-6"
                   />
@@ -253,7 +302,7 @@ export default function LensCatalog() {
                       <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
                       <circle cx="12" cy="10" r="3"/>
                     </svg>
-                    {manufacturer.country.name}
+                    {countryName(manufacturer)}
                   </div>
                 )}
 
@@ -263,24 +312,48 @@ export default function LensCatalog() {
                   </p>
                 )}
               </div>
-            </Link>
-          ))}
+              </>
+            );
+            if (clickable) {
+              return (
+                <Link
+                  key={manufacturer.id}
+                  to={getManufacturerHref(manufacturer)}
+                  target={shouldOpenPdf ? "_blank" : undefined}
+                  rel={shouldOpenPdf ? "noopener noreferrer" : undefined}
+                  className={cardClass}
+                  style={cardStyle}
+                  title={cardTitle}
+                >
+                  {content}
+                </Link>
+              );
+            }
+            return (
+              <article
+                key={manufacturer.id}
+                className={cardClass}
+                style={cardStyle}
+                title={cardTitle}
+              >
+                {content}
+              </article>
+            );
+          })}
         </div>
       ) : (
         <div className="space-y-4">
-          {filteredManufacturers.map((manufacturer) => (
-            <Link
-              key={manufacturer.id}
-              to={getManufacturerHref(manufacturer)}
-              target={((manufacturer.open_pdf_in_lens_catalog ?? true) && manufacturer.catalog_pdf_url) ? "_blank" : undefined}
-              rel={((manufacturer.open_pdf_in_lens_catalog ?? true) && manufacturer.catalog_pdf_url) ? "noopener noreferrer" : undefined}
-              className="group rounded-2xl overflow-hidden transition-all flex"
-              style={{
-                backgroundColor: 'var(--bg-primary)',
-                border: '1px solid var(--border)',
-              }}
-              title={getManufacturerTitle(manufacturer)}
-            >
+          {filteredManufacturers.map((manufacturer) => {
+            const shouldOpenPdf = (manufacturer.open_pdf_in_lens_catalog ?? true) && !!manufacturer.catalog_pdf_url;
+            const clickable = canOpenManufacturer(manufacturer);
+            const cardClass = `group rounded-2xl overflow-hidden transition-all flex${clickable ? "" : " cursor-default"}`;
+            const cardStyle = {
+              backgroundColor: 'var(--bg-primary)',
+              border: '1px solid var(--border)',
+            } as const;
+            const cardTitle = clickable ? getManufacturerTitle(manufacturer) : `${manufacturer.name} (информация)`;
+            const content = (
+              <>
               {/* Изображение */}
               <div 
                 className="w-32 sm:w-48 flex-shrink-0 flex items-center justify-center overflow-hidden"
@@ -288,7 +361,7 @@ export default function LensCatalog() {
               >
                 {manufacturer.image_url ? (
                   <img 
-                    src={manufacturer.image_url} 
+                    src={logoSrc(manufacturer)} 
                     alt={manufacturer.name}
                     className="w-full h-full object-contain p-4"
                   />
@@ -322,7 +395,7 @@ export default function LensCatalog() {
                         <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
                         <circle cx="12" cy="10" r="3"/>
                       </svg>
-                      {manufacturer.country.name}
+                      {countryName(manufacturer)}
                     </div>
                   )}
 
@@ -333,8 +406,34 @@ export default function LensCatalog() {
                   )}
                 </div>
               </div>
-            </Link>
-          ))}
+              </>
+            );
+            if (clickable) {
+              return (
+                <Link
+                  key={manufacturer.id}
+                  to={getManufacturerHref(manufacturer)}
+                  target={shouldOpenPdf ? "_blank" : undefined}
+                  rel={shouldOpenPdf ? "noopener noreferrer" : undefined}
+                  className={cardClass}
+                  style={cardStyle}
+                  title={cardTitle}
+                >
+                  {content}
+                </Link>
+              );
+            }
+            return (
+              <article
+                key={manufacturer.id}
+                className={cardClass}
+                style={cardStyle}
+                title={cardTitle}
+              >
+                {content}
+              </article>
+            );
+          })}
         </div>
       )}
     </div>

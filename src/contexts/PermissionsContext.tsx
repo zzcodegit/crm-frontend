@@ -95,9 +95,19 @@ export function PermissionsProvider({ children }: { children: React.ReactNode })
     (sectionKey: SectionKey) => {
       const isAdmin = user?.role === "admin" || Boolean(user?.is_admin);
       if (isAdmin) return true;
+      if (sectionKey === "scheduleManagement") {
+        const directGroupIds = user?.group_ids ?? [];
+        const userGroupIds = directGroupIds.length > 0 ? directGroupIds : inferredGroupIdsByRole;
+        if (userGroupIds.length === 0) return false;
+        return userGroupIds.some((groupId) => {
+          const denied = groupPermissions[String(groupId)];
+          if (denied === undefined) return false;
+          return !denied.includes("scheduleManagement");
+        });
+      }
       return !deniedByUserGroups.has(sectionKey);
     },
-    [deniedByUserGroups, user?.is_admin, user?.role]
+    [deniedByUserGroups, groupPermissions, inferredGroupIdsByRole, user?.group_ids, user?.is_admin, user?.role]
   );
 
   const isPathAllowed = useCallback(

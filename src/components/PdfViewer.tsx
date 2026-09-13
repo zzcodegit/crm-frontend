@@ -2,17 +2,21 @@ import { useState, useEffect, useRef } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import "react-pdf/dist/Page/TextLayer.css";
-import PdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?worker";
 
-// Worker для pdf.js (Vite): поднимаем через ?worker, чтобы избежать
-// dynamic import ошибок .mjs на части прод-конфигов и WebView.
-if (typeof window !== "undefined" && pdfjs?.GlobalWorkerOptions) {
-  try {
-    const worker = new PdfWorker();
-    pdfjs.GlobalWorkerOptions.workerPort = worker;
-  } catch {
-    // fallback: пусть react-pdf покажет ошибку загрузки, если worker не поднялся
+let pdfWorkerReady: Promise<void> | null = null;
+
+/** Worker поднимаем только при открытии PDF — не блокируем старт CRM на iPhone/Safari. */
+function ensurePdfWorker(): Promise<void> {
+  if (!pdfWorkerReady) {
+    pdfWorkerReady = (async () => {
+      if (typeof window === "undefined" || !pdfjs?.GlobalWorkerOptions) return;
+      if (pdfjs.GlobalWorkerOptions.workerPort) return;
+      const { default: PdfWorker } = await import("pdfjs-dist/build/pdf.worker.min.mjs?worker");
+      const worker = new PdfWorker();
+      pdfjs.GlobalWorkerOptions.workerPort = worker;
+    })().catch(() => undefined);
   }
+  return pdfWorkerReady;
 }
 
 interface PdfViewerProps {
@@ -26,12 +30,33 @@ function getPageWidth() {
   return Math.min(900, window.innerWidth - 48);
 }
 
+function toPdfDocumentSource(file: string): string {
+  const f = (file || "").trim();
+  if (!f) return "";
+  // blob:/data: — уже абсолютные (офлайн-кэш IndexedDB → createObjectURL); не склеивать с origin.
+  if (f.startsWith("blob:") || f.startsWith("data:")) return f;
+  if (f.startsWith("http://") || f.startsWith("https://")) return f;
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  return `${origin}${f.startsWith("/") ? "" : "/"}${f}`;
+}
+
 export default function PdfViewer({ file, className = "" }: PdfViewerProps) {
   const [numPages, setNumPages] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [workerReady, setWorkerReady] = useState(false);
   const [pageWidth, setPageWidth] = useState(getPageWidth);
   const scrollYRef = useRef(0);
-  const fullUrl = file.startsWith("http") ? file : `${window.location.origin}${file}`;
+  const fullUrl = toPdfDocumentSource(file);
+
+  useEffect(() => {
+    let cancelled = false;
+    void ensurePdfWorker().then(() => {
+      if (!cancelled) setWorkerReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     setError(null);
@@ -61,6 +86,22 @@ export default function PdfViewer({ file, className = "" }: PdfViewerProps) {
     });
     return () => cancelAnimationFrame(id);
   }, [numPages]);
+
+  if (!fullUrl) {
+    return (
+      <div className={`p-4 rounded-xl text-center ${className}`} style={{ color: "var(--text-secondary)" }}>
+        Не указан адрес PDF
+      </div>
+    );
+  }
+
+  if (!workerReady) {
+    return (
+      <div className={`flex items-center justify-center py-16 ${className}`} style={{ color: "var(--text-secondary)" }}>
+        Загрузка PDF…
+      </div>
+    );
+  }
 
   return (
     <div

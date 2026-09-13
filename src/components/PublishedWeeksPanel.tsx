@@ -23,6 +23,7 @@ export default function PublishedWeeksPanel({
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [collapsed, setCollapsed] = useState(false);
 
   const load = useCallback(async () => {
     setErr(null);
@@ -74,18 +75,30 @@ export default function PublishedWeeksPanel({
       className="mb-6 p-4 rounded-xl border min-w-0"
       style={{ borderColor: "var(--border)", background: "var(--bg-secondary)" }}
     >
-      <div className="text-sm font-semibold mb-2" style={{ color: "var(--text-primary)" }}>
-        Опубликованные недели
+      <div className="flex items-center justify-between gap-3 mb-2">
+        <div className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
+          Опубликованные недели
+        </div>
+        <button
+          type="button"
+          onClick={() => setCollapsed((v) => !v)}
+          className="px-3 py-1.5 rounded-lg text-xs font-medium"
+          style={{ background: "var(--bg-primary)", border: "1px solid var(--border)", color: "var(--text-primary)" }}
+        >
+          {collapsed ? "Показать" : "Скрыть"}
+        </button>
       </div>
-      <p className="text-xs mb-3 leading-relaxed" style={{ color: "var(--text-tertiary)" }}>
-        Изменить график: «Открыть в редакторе» — правки в таблице ниже — «Опубликовать». На сервер уходят недели из локального хранилища этого браузера; они дополняют уже опубликованное, остальные недели не удаляются.
-      </p>
+      {!collapsed && (
+        <p className="text-xs mb-3 leading-relaxed" style={{ color: "var(--text-tertiary)" }}>
+          Изменить график: «Открыть в редакторе» — правки в таблице ниже — «Опубликовать». На сервер уходят недели из локального хранилища этого браузера; они дополняют уже опубликованное, остальные недели не удаляются.
+        </p>
+      )}
       {err && (
         <p className="text-sm mb-2" style={{ color: "var(--error,#b91c1c)" }}>
           {err}
         </p>
       )}
-      {loading ? (
+      {collapsed ? null : loading ? (
         <div className="text-sm" style={{ color: "var(--text-secondary)" }}>
           Загрузка…
         </div>
@@ -94,44 +107,52 @@ export default function PublishedWeeksPanel({
           Нет опубликованных недель.
         </p>
       ) : (
-        <ul className="space-y-2">
-          {keys.map((ws) => (
-            <li
-              key={ws}
-              className="flex flex-wrap items-center justify-between gap-2 rounded-lg px-3 py-2"
-              style={{ background: "var(--bg-primary)", border: "1px solid var(--border)" }}
-            >
-              <span className="text-sm min-w-0" style={{ color: "var(--text-primary)" }}>
-                {weekRangeLabel(ws)}{" "}
-                <span className="text-xs" style={{ color: "var(--text-tertiary)" }}>
-                  (пн. {ws})
+        <div
+          className="pr-1"
+          style={{
+            maxHeight: 320,
+            overflowY: "auto",
+          }}
+        >
+          <ul className="space-y-2">
+            {keys.map((ws) => (
+              <li
+                key={ws}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-lg px-3 py-2"
+                style={{ background: "var(--bg-primary)", border: "1px solid var(--border)" }}
+              >
+                <span className="text-sm min-w-0" style={{ color: "var(--text-primary)" }}>
+                  {weekRangeLabel(ws)}{" "}
+                  <span className="text-xs" style={{ color: "var(--text-tertiary)" }}>
+                    (пн. {ws})
+                  </span>
                 </span>
-              </span>
-              <span className="flex flex-wrap gap-2 shrink-0">
-                <Link
-                  to={`/schedule-management?week=${encodeURIComponent(ws)}`}
-                  className="inline-flex items-center px-3 py-1.5 rounded-lg text-xs font-medium"
-                  style={{
-                    background: "var(--bg-secondary)",
-                    border: "1px solid var(--border)",
-                    color: "var(--text-primary)",
-                  }}
-                >
-                  Открыть в редакторе
-                </Link>
-                <button
-                  type="button"
-                  disabled={deleting === ws}
-                  onClick={() => void handleDelete(ws)}
-                  className="inline-flex items-center px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50"
-                  style={{ background: "#fee2e2", border: "1px solid #fecaca", color: "#b91c1c" }}
-                >
-                  {deleting === ws ? "Удаление…" : "Снять с публикации"}
-                </button>
-              </span>
-            </li>
-          ))}
-        </ul>
+                <span className="flex flex-wrap gap-2 shrink-0">
+                  <Link
+                    to={`/schedule-management?week=${encodeURIComponent(ws)}`}
+                    className="inline-flex items-center px-3 py-1.5 rounded-lg text-xs font-medium"
+                    style={{
+                      background: "var(--bg-secondary)",
+                      border: "1px solid var(--border)",
+                      color: "var(--text-primary)",
+                    }}
+                  >
+                    Открыть в редакторе
+                  </Link>
+                  <button
+                    type="button"
+                    disabled={deleting === ws}
+                    onClick={() => void handleDelete(ws)}
+                    className="inline-flex items-center px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50"
+                    style={{ background: "#fee2e2", border: "1px solid #fecaca", color: "#b91c1c" }}
+                  >
+                    {deleting === ws ? "Удаление…" : "Снять с публикации"}
+                  </button>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </div>
   );

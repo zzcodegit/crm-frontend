@@ -13,6 +13,7 @@ export default function ManufacturerForm() {
   const [imageUrl, setImageUrl] = useState("");
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState("");
+  const [borderColor, setBorderColor] = useState("");
   const [catalogPdfUrl, setCatalogPdfUrl] = useState<string | null>(null);
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [showInLensCatalog, setShowInLensCatalog] = useState(true);
@@ -50,6 +51,7 @@ export default function ManufacturerForm() {
       setCountryId(manufacturer.country_id || null);
       setImageUrl(manufacturer.image_url || "");
       setImagePreview(manufacturer.image_url || "");
+      setBorderColor((manufacturer.border_color ?? "") as string);
       setCatalogPdfUrl(manufacturer.catalog_pdf_url || null);
       setShowInLensCatalog(manufacturer.show_in_lens_catalog ?? true);
       setOpenPdfInLensCatalog(manufacturer.open_pdf_in_lens_catalog ?? true);
@@ -182,6 +184,7 @@ export default function ManufacturerForm() {
         description?: string;
         country_id?: number;
         image_url?: string;
+        border_color?: string | null;
         catalog_pdf_url?: string | null;
         show_in_lens_catalog?: boolean;
         open_pdf_in_lens_catalog?: boolean;
@@ -192,6 +195,7 @@ export default function ManufacturerForm() {
         description: description.trim() || undefined,
         country_id: countryId || undefined,
         image_url: finalImageUrl || undefined,
+        border_color: borderColor.trim() ? borderColor.trim() : null,
         catalog_pdf_url: finalPdfUrl ?? undefined,
         show_in_lens_catalog: showInLensCatalog,
         open_pdf_in_lens_catalog: openPdfInLensCatalog,
@@ -438,6 +442,49 @@ export default function ManufacturerForm() {
                 </div>
               )}
             </div>
+          </div>
+
+          {/* Цвет рамки в прайсе */}
+          <div>
+            <label className="block text-sm font-semibold mb-3" style={{ color: "var(--text-primary)" }}>
+              Цвет рамки в прайсе
+            </label>
+            <div className="flex items-center gap-3">
+              <input
+                type="color"
+                value={borderColor || "#000000"}
+                onChange={(e) => setBorderColor(e.target.value)}
+                disabled={loading || uploading}
+                className="h-11 w-16 rounded-xl border"
+                style={{ backgroundColor: "transparent", borderColor: "var(--border)" }}
+                aria-label="Выбор цвета рамки"
+              />
+              <input
+                type="text"
+                value={borderColor}
+                onChange={(e) => setBorderColor(e.target.value)}
+                disabled={loading || uploading}
+                className="flex-1 px-4 py-3.5 rounded-xl text-base transition-all"
+                style={{
+                  backgroundColor: "var(--bg-secondary)",
+                  color: "var(--text-primary)",
+                  border: "2px solid var(--border)",
+                }}
+                placeholder="#rrggbb (например #ff0000)"
+              />
+              <button
+                type="button"
+                onClick={() => setBorderColor("")}
+                disabled={loading || uploading}
+                className="px-4 py-3.5 rounded-xl text-sm font-semibold disabled:opacity-50"
+                style={{ backgroundColor: "var(--bg-secondary)", color: "var(--text-primary)", border: "1px solid var(--border)" }}
+              >
+                Очистить
+              </button>
+            </div>
+            <p className="mt-2 text-xs" style={{ color: "var(--text-tertiary)" }}>
+              Если цвет задан — в прайсе у логотипа поставщика будет рамка 5px этого цвета.
+            </p>
           </div>
 
           {/* Каталог PDF */}

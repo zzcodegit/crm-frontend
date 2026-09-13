@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, type ReportItem, type WarehouseItem } from "../api";
 import { ReportsAnalyticsDateToolbar } from "../components/ReportsAnalyticsDateToolbar";
+import ReportsSubnav from "../components/ReportsSubnav";
 import { BarChartHorizontal, LineChartSeries } from "../components/ReportCharts";
 import {
   aggregateReportMoney,
@@ -234,6 +235,8 @@ export default function ReportsAnalyticsPoint() {
           Динамика выручки и оплат, сводка по выбранному складу за период. Только для администратора.
         </p>
       </div>
+
+      <ReportsSubnav active="analytics-point" />
 
       <ReportsAnalyticsDateToolbar
         from={from}

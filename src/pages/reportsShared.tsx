@@ -9,34 +9,120 @@ export const inputStyle: React.CSSProperties = {
   width: "100%",
 };
 
-export function uploadReportFile(file: File): Promise<string> {
-  const formData = new FormData();
-  formData.append("file", file);
+const MAX_REPORT_UPLOAD_BYTES = 100 * 1024 * 1024;
+const UPLOAD_TIMEOUT_MS = 5 * 60 * 1000;
+const UPLOAD_MAX_RETRIES = 3;
+
+function isNetworkUploadError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = (err.message || "").toLowerCase();
+  return (
+    msg === "network" ||
+    msg.includes("failed to fetch") ||
+    msg.includes("networkerror") ||
+    msg.includes("network request failed") ||
+    msg.includes("load failed") ||
+    msg.includes("aborted") ||
+    msg.includes("timeout")
+  );
+}
+
+function humanizeUploadError(err: unknown): string {
+  if (err instanceof Error) {
+    if (isNetworkUploadError(err)) {
+      return "Не удалось загрузить файл: проверьте интернет и попробуйте ещё раз";
+    }
+    return err.message;
+  }
+  return "Ошибка загрузки файла";
+}
+
+function parseUploadErrorResponse(status: number, text: string): string {
+  let msg = "Ошибка загрузки";
+  try {
+    const d = JSON.parse(text);
+    const detail = d.detail;
+    if (typeof detail === "string") msg = detail;
+    else if (Array.isArray(detail) && detail[0]?.msg) msg = detail.map((x: { msg?: string }) => x.msg).join("; ");
+  } catch {
+    if (status === 413) msg = "Файл слишком большой (максимум 100 МБ)";
+    else if (status === 401) msg = "Нужна авторизация — перезайдите в систему";
+    else if (status >= 500) msg = "Ошибка сервера при загрузке, попробуйте позже";
+  }
+  return msg;
+}
+
+function parseUploadSuccessPayload(data: { url?: string; filename?: string }): string {
+  const url = data?.url ?? (data?.filename ? `/uploads/${data.filename}` : "");
+  if (!url) throw new Error("Нет ссылки в ответе");
+  return url;
+}
+
+function uploadReportFileXHR(file: File, token: string | null): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/upload/report");
+    xhr.timeout = UPLOAD_TIMEOUT_MS;
+    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    xhr.onload = () => {
+      const text = xhr.responseText || "";
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          const d = JSON.parse(text) as { url?: string; filename?: string };
+          resolve(parseUploadSuccessPayload(d));
+        } catch {
+          reject(new Error("Некорректный ответ сервера"));
+        }
+        return;
+      }
+      reject(new Error(parseUploadErrorResponse(xhr.status, text)));
+    };
+    xhr.onerror = () => reject(new Error("network"));
+    xhr.ontimeout = () => reject(new Error("timeout"));
+    xhr.onabort = () => reject(new Error("aborted"));
+    const formData = new FormData();
+    formData.append("file", file);
+    xhr.send(formData);
+  });
+}
+
+async function uploadReportFileOnce(file: File): Promise<string> {
+  if (file.size > MAX_REPORT_UPLOAD_BYTES) {
+    throw new Error("Файл слишком большой (максимум 100 МБ)");
+  }
   const token = localStorage.getItem("token");
-  return fetch("/api/upload/report", {
-    method: "POST",
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-    body: formData,
-  }).then(async (res) => {
+  try {
+    return await uploadReportFileXHR(file, token);
+  } catch (xhrErr) {
+    if (!isNetworkUploadError(xhrErr)) throw xhrErr;
+    const formData = new FormData();
+    formData.append("file", file);
+    const res = await fetch("/api/upload/report", {
+      method: "POST",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: formData,
+    });
     if (!res.ok) {
       const text = await res.text();
-      let msg = "Ошибка загрузки";
-      try {
-        const d = JSON.parse(text);
-        const detail = d.detail;
-        if (typeof detail === "string") msg = detail;
-        else if (Array.isArray(detail) && detail[0]?.msg) msg = detail.map((x: { msg?: string }) => x.msg).join("; ");
-      } catch {
-        if (res.status === 413) msg = "Файл слишком большой (максимум 100 МБ)";
-        else if (res.status === 401) msg = "Нужна авторизация";
-      }
-      return Promise.reject(new Error(msg));
+      throw new Error(parseUploadErrorResponse(res.status, text));
     }
     const d = (await res.json()) as { url?: string; filename?: string };
-    const url = d?.url ?? (d?.filename ? `/uploads/${d.filename}` : "");
-    if (!url) throw new Error("Нет ссылки в ответе");
-    return url;
-  });
+    return parseUploadSuccessPayload(d);
+  }
+}
+
+export async function uploadReportFile(file: File): Promise<string> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < UPLOAD_MAX_RETRIES; attempt++) {
+    try {
+      return await uploadReportFileOnce(file);
+    } catch (err) {
+      lastErr = err;
+      if (!isNetworkUploadError(err) || attempt >= UPLOAD_MAX_RETRIES - 1) break;
+      await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+    }
+  }
+  throw new Error(humanizeUploadError(lastErr));
 }
 
 export const isPdfUrl = (url: string) => url.toLowerCase().endsWith(".pdf");

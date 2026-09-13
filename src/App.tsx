@@ -1,10 +1,13 @@
-import { Routes, Route, Navigate } from "react-router-dom";
+import { lazy, Suspense } from "react";
+import { Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "./contexts/AuthContext";
 import Login from "./pages/Login";
+import SystemStatus from "./pages/SystemStatus";
 import Layout from "./components/Layout";
 import Dashboard from "./pages/Dashboard";
 import Settings from "./pages/Settings";
 import Users from "./pages/Users";
+import UsersBulkEdit from "./pages/UsersBulkEdit";
 import UserEdit from "./pages/UserEdit";
 import GroupMembers from "./pages/GroupMembers";
 import Orders from "./pages/Orders";
@@ -14,12 +17,13 @@ import RefBook from "./pages/RefBook";
 import ProductsRef from "./pages/ProductsRef";
 import ProductCharacteristicsRef from "./pages/ProductCharacteristicsRef";
 import LensCatalog from "./pages/LensCatalog";
-import LensCatalogPdfPage from "./pages/LensCatalogPdfPage";
+const LensCatalogPdfPage = lazy(() => import("./pages/LensCatalogPdfPage"));
 import Drive from "./pages/Drive";
 import DriveFileView from "./pages/DriveFileView";
 import DrivePublicLink from "./pages/DrivePublicLink";
 import LensDetail from "./pages/LensDetail";
 import Pricelist from "./pages/Pricelist";
+import PricelistPriceManage from "./pages/PricelistPriceManage";
 import PricelistRx from "./pages/PricelistRx";
 import PricelistMkl from "./pages/PricelistMkl";
 import PricelistDetail from "./pages/PricelistDetail";
@@ -34,9 +38,12 @@ import ReportsAnalyticsConsultant from "./pages/ReportsAnalyticsConsultant";
 import ReportsDebtsSummary from "./pages/ReportsDebtsSummary";
 import ReportsWithholding from "./pages/ReportsWithholding";
 import ReportNew from "./pages/ReportNew";
+import Info from "./pages/Info";
 import Training from "./pages/Training";
 import TrainingArticleForm from "./pages/TrainingArticleForm";
 import TrainingArticleView from "./pages/TrainingArticleView";
+import TrainingArticleReport from "./pages/TrainingArticleReport";
+import TrainingArticlesAnalytics from "./pages/TrainingArticlesAnalytics";
 import TrainingCourseBuilder from "./pages/TrainingCourseBuilder";
 import TrainingCoursePlayer from "./pages/TrainingCoursePlayer";
 import NormativeActs from "./pages/NormativeActs";
@@ -65,14 +72,53 @@ import Tasks from "./pages/Tasks";
 import SupplyTickets from "./pages/SupplyTickets";
 import ScheduleManagement from "./pages/ScheduleManagement";
 import ScheduleConfirmationsReport from "./pages/ScheduleConfirmationsReport";
+import { usePermissions } from "./contexts/PermissionsContext";
+import type { SectionKey } from "./permissions";
 
 function Protected({ children }: { children: React.ReactNode }) {
-  const { user, loading } = useAuth();
+  const { user, loading, authError } = useAuth();
   if (loading) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center gap-4 text-slate-500 bg-slate-50 dark:bg-slate-900 dark:text-slate-400">
         <div className="w-8 h-8 border-2 border-slate-300 border-t-blue-500 rounded-full animate-spin" />
         <span>Загрузка…</span>
+      </div>
+    );
+  }
+  if (authError) {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-4" style={{ backgroundColor: "var(--bg-secondary)" }}>
+        <div
+          className="max-w-md w-full rounded-2xl p-6 text-center"
+          style={{ backgroundColor: "var(--bg-primary)", border: "1px solid var(--border)" }}
+        >
+          <h1 className="text-lg font-semibold mb-2" style={{ color: "var(--text-primary)" }}>
+            Не удалось войти
+          </h1>
+          <p className="text-sm mb-5" style={{ color: "var(--text-secondary)" }}>
+            {authError}
+          </p>
+          <div className="flex flex-col sm:flex-row gap-3 justify-center">
+            <a
+              href="/status"
+              className="px-4 py-2.5 rounded-xl text-sm font-semibold text-white"
+              style={{ background: "linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%)" }}
+            >
+              Диагностика
+            </a>
+            <a
+              href="/login"
+              className="px-4 py-2.5 rounded-xl text-sm font-semibold"
+              style={{
+                backgroundColor: "var(--bg-secondary)",
+                border: "1px solid var(--border)",
+                color: "var(--text-primary)",
+              }}
+            >
+              Войти снова
+            </a>
+          </div>
+        </div>
       </div>
     );
   }
@@ -88,97 +134,225 @@ function AdminOnly({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-export default function App() {
+function AdminOrReportnik({ children }: { children: React.ReactNode }) {
+  const { user, loading } = useAuth();
+  if (loading) return null;
+  if (!user) return <Navigate to="/login" replace />;
+  if (!user.is_admin && user.is_reportnik !== true) return <Navigate to="/" replace />;
+  return <>{children}</>;
+}
+
+/** Сводка долгов: полная для админа, только свои строки для консультанта. */
+function ReportsDebtsSummaryRoute() {
+  const { user, loading } = useAuth();
+  if (loading) return null;
+  if (!user) return <Navigate to="/login" replace />;
+  return <ReportsDebtsSummary consultantSelfView={!user.is_admin} />;
+}
+
+function SectionAllowed({ section, children }: { section: SectionKey; children: React.ReactNode }) {
+  const { user, loading } = useAuth();
+  const { isSectionAllowed, firstAllowedPath } = usePermissions();
+  if (loading) return null;
+  if (!user) return <Navigate to="/login" replace />;
+  if (!isSectionAllowed(section)) return <Navigate to={firstAllowedPath} replace />;
+  return <>{children}</>;
+}
+
+function TrainingAnalyticsOnly({ children }: { children: React.ReactNode }) {
+  const { user, loading } = useAuth();
+  if (loading) return null;
+  if (!user) return <Navigate to="/login" replace />;
+  if (!user.is_admin && !user.is_manager) return <Navigate to="/" replace />;
+  return <>{children}</>;
+}
+
+function RouteFallback() {
   return (
-    <Routes>
-      <Route path="/drive/share/:token" element={<DrivePublicLink />} />
-      <Route path="/login" element={<Login />} />
-      <Route
-        path="/"
-        element={
-          <Protected>
-            <Layout />
-          </Protected>
-        }
+    <div className="min-h-[40vh] flex flex-col items-center justify-center gap-3 text-slate-500 bg-slate-50 dark:bg-slate-900 dark:text-slate-400">
+      <div className="w-8 h-8 border-2 border-slate-300 border-t-blue-500 rounded-full animate-spin" />
+      <span>Загрузка…</span>
+    </div>
+  );
+}
+
+export default function App() {
+  const location = useLocation();
+  const state = location.state as { backgroundLocation?: unknown } | null;
+  const backgroundLocation = (state as any)?.backgroundLocation as any;
+
+  return (
+    <>
+      <Routes location={backgroundLocation || location}>
+        <Route path="/drive/share/:token" element={<DrivePublicLink />} />
+        <Route path="/status" element={<SystemStatus />} />
+        <Route path="/login" element={<Login />} />
+        <Route
+          path="/"
+          element={
+            <Protected>
+              <Layout />
+            </Protected>
+          }
+        >
+          <Route index element={<Dashboard />} />
+          <Route path="orders" element={<Orders />} />
+          <Route path="orders/:id" element={<OrderDetail />} />
+          <Route path="drive" element={<Drive />} />
+          <Route path="drive/view/:id" element={<DriveFileView />} />
+          <Route path="lens-catalog" element={<LensCatalog />} />
+          <Route
+            path="lens-catalog/pdf"
+            element={
+              <Suspense fallback={<RouteFallback />}>
+                <LensCatalogPdfPage />
+              </Suspense>
+            }
+          />
+          <Route path="lens-catalog/:id" element={<LensDetail />} />
+          <Route path="pricelist" element={<Pricelist />} />
+          <Route path="pricelist/new" element={<AdminOnly><PricelistCreate /></AdminOnly>} />
+          <Route path="pricelist/prices" element={<AdminOnly><PricelistPriceManage /></AdminOnly>} />
+          <Route path="pricelist/:id/edit" element={<AdminOnly><PricelistEdit /></AdminOnly>} />
+          <Route path="pricelist/:id" element={<PricelistDetail />} />
+          <Route path="pricelist-rx" element={<PricelistRx />} />
+          <Route path="pricelist-rx/new" element={<AdminOnly><PricelistCreate /></AdminOnly>} />
+          <Route path="pricelist-rx/prices" element={<AdminOnly><PricelistPriceManage /></AdminOnly>} />
+          <Route path="pricelist-rx/:id/edit" element={<AdminOnly><PricelistEdit /></AdminOnly>} />
+          <Route path="pricelist-rx/:id" element={<PricelistDetail />} />
+          <Route path="pricelist-mkl" element={<PricelistMkl />} />
+          <Route path="pricelist-mkl/new" element={<AdminOnly><PricelistCreate /></AdminOnly>} />
+          <Route path="pricelist-mkl/prices" element={<AdminOnly><PricelistPriceManage /></AdminOnly>} />
+          <Route path="pricelist-mkl/:id/edit" element={<AdminOnly><PricelistEdit /></AdminOnly>} />
+          <Route path="pricelist-mkl/:id" element={<PricelistDetail />} />
+          <Route path="info" element={<SectionAllowed section="info"><Info /></SectionAllowed>} />
+          <Route path="reports" element={<Reports />} />
+          <Route path="reports/expenses" element={<AdminOnly><ReportsExpenses /></AdminOnly>} />
+          <Route path="reports/encashment" element={<AdminOnly><ReportsEncashment /></AdminOnly>} />
+          <Route path="reports/central-cash" element={<AdminOnly><ReportsCentralCash /></AdminOnly>} />
+          <Route path="reports/analytics/point" element={<AdminOnly><ReportsAnalyticsPoint /></AdminOnly>} />
+          <Route path="reports/analytics/consultant" element={<AdminOnly><ReportsAnalyticsConsultant /></AdminOnly>} />
+          <Route path="reports/debts-summary" element={<ReportsDebtsSummaryRoute />} />
+          <Route path="reports/withholding" element={<AdminOnly><ReportsWithholding /></AdminOnly>} />
+          <Route path="reports/my-debts-stats" element={<Navigate to="/reports/debts-summary" replace />} />
+          <Route path="reports/:id/edit" element={<AdminOrReportnik><ReportNew /></AdminOrReportnik>} />
+          <Route path="reports/new" element={<ReportNew />} />
+          <Route
+            path="schedule-management"
+            element={
+              <SectionAllowed section="scheduleManagement">
+                <ScheduleManagement />
+              </SectionAllowed>
+            }
+          />
+          <Route
+            path="schedule-confirmations"
+            element={
+              <SectionAllowed section="scheduleManagement">
+                <ScheduleConfirmationsReport />
+              </SectionAllowed>
+            }
+          />
+          <Route path="supply-tickets" element={<SupplyTickets />} />
+          <Route path="tasks" element={<Tasks />} />
+          <Route path="training/course/new" element={<AdminOnly><TrainingCourseBuilder /></AdminOnly>} />
+          <Route path="training/course/:id/edit" element={<AdminOnly><TrainingCourseBuilder /></AdminOnly>} />
+          <Route path="training/course/:id" element={<TrainingCoursePlayer />} />
+          <Route path="training" element={<Training />} />
+          <Route path="training/new" element={<AdminOnly><TrainingArticleForm /></AdminOnly>} />
+          <Route path="training/analytics" element={<TrainingAnalyticsOnly><TrainingArticlesAnalytics /></TrainingAnalyticsOnly>} />
+          <Route path="training/:id/report" element={<TrainingAnalyticsOnly><TrainingArticleReport /></TrainingAnalyticsOnly>} />
+          <Route path="training/:id/edit" element={<AdminOnly><TrainingArticleForm /></AdminOnly>} />
+          <Route path="training/:id" element={<TrainingArticleView />} />
+          <Route path="normative-acts" element={<NormativeActs />} />
+          <Route path="normative-acts/report" element={<AdminOnly><NormativeActsReport /></AdminOnly>} />
+          <Route path="normative-acts/new" element={<AdminOnly><NormativeActForm /></AdminOnly>} />
+          <Route path="normative-acts/:id/edit" element={<AdminOnly><NormativeActForm /></AdminOnly>} />
+          <Route path="normative-acts/:id/report" element={<AdminOnly><NormativeActReport /></AdminOnly>} />
+          <Route path="normative-acts/:id" element={<NormativeActView />} />
+          <Route path="settings" element={<Settings />} />
+          <Route path="settings/users" element={<AdminOnly><Users /></AdminOnly>} />
+          <Route path="settings/users/bulk" element={<AdminOnly><UsersBulkEdit /></AdminOnly>} />
+          <Route path="settings/groups/:groupId" element={<AdminOnly><GroupMembers /></AdminOnly>} />
+          <Route path="settings/users/:id" element={<AdminOnly><UserEdit /></AdminOnly>} />
+          <Route path="settings/references" element={<AdminOnly><References /></AdminOnly>} />
+          <Route path="settings/references/manufacturers" element={<AdminOnly><Manufacturers /></AdminOnly>} />
+          <Route path="settings/references/manufacturers/:id" element={<AdminOnly><ManufacturerForm /></AdminOnly>} />
+          <Route path="settings/references/features" element={<AdminOnly><Features /></AdminOnly>} />
+          <Route path="settings/references/features/:id" element={<AdminOnly><FeatureForm /></AdminOnly>} />
+          <Route path="settings/references/products" element={<AdminOnly><ProductsRef /></AdminOnly>} />
+          <Route path="settings/references/product-characteristics" element={<AdminOnly><ProductCharacteristicsRef /></AdminOnly>} />
+          <Route path="settings/references/colors" element={<AdminOnly><Colors /></AdminOnly>} />
+          <Route path="settings/references/colors/:id" element={<AdminOnly><ColorForm /></AdminOnly>} />
+          <Route path="settings/references/pricelist-groups" element={<AdminOnly><PricelistGroups /></AdminOnly>} />
+          <Route path="settings/references/pricelist-groups/:id" element={<AdminOnly><PricelistGroupForm /></AdminOnly>} />
+          <Route path="settings/references/pricelist-rx-groups" element={<AdminOnly><PricelistRxGroups /></AdminOnly>} />
+          <Route path="settings/references/pricelist-rx-groups/:id" element={<AdminOnly><PricelistGroupForm /></AdminOnly>} />
+          <Route path="settings/references/pricelist-mkl-groups" element={<AdminOnly><PricelistMklGroups /></AdminOnly>} />
+          <Route path="settings/references/pricelist-mkl-groups/:id" element={<AdminOnly><PricelistGroupForm /></AdminOnly>} />
+          <Route path="settings/references/warehouses" element={<AdminOnly><Warehouses /></AdminOnly>} />
+          <Route path="settings/references/warehouses/:id" element={<AdminOnly><WarehouseForm /></AdminOnly>} />
+          <Route path="settings/references/custom-field/:id" element={<AdminOnly><CustomFieldReference /></AdminOnly>} />
+          <Route path="settings/references/:refKey" element={<AdminOnly><RefBook /></AdminOnly>} />
+          <Route path="settings/permissions" element={<AdminOnly><SettingsPermissions /></AdminOnly>} />
+          <Route path="settings/custom-fields" element={<AdminOnly><CustomFieldsSettings /></AdminOnly>} />
+          <Route path="settings/pricelist-publications" element={<AdminOnly><PricelistPublications /></AdminOnly>} />
+          <Route path="settings/portal-tasks" element={<Navigate to="/tasks" replace />} />
+          <Route path="chat" element={<ChatMessenger />} />
+        </Route>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+
+      {backgroundLocation ? (
+        <Routes>
+          <Route
+            path="/reports/:id/edit"
+            element={
+              <ReportEditModalOverlay>
+                <AdminOrReportnik>
+                  <ReportNew />
+                </AdminOrReportnik>
+              </ReportEditModalOverlay>
+            }
+          />
+        </Routes>
+      ) : null}
+    </>
+  );
+}
+
+function ReportEditModalOverlay({ children }: { children: React.ReactNode }) {
+  const navigate = useNavigate();
+  const onClose = () => navigate(-1);
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-start justify-center p-3 sm:p-4"
+      style={{ background: "rgba(0,0,0,0.55)" }}
+      onClick={onClose}
+      role="presentation"
+    >
+      <div
+        className="w-full max-w-6xl rounded-2xl shadow-xl overflow-hidden"
+        style={{ background: "var(--bg-primary)", border: "1px solid var(--border)" }}
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Редактирование отчёта"
       >
-        <Route index element={<Dashboard />} />
-        <Route path="orders" element={<Orders />} />
-        <Route path="orders/:id" element={<OrderDetail />} />
-        <Route path="drive" element={<Drive />} />
-        <Route path="drive/view/:id" element={<DriveFileView />} />
-        <Route path="lens-catalog" element={<LensCatalog />} />
-        <Route path="lens-catalog/pdf" element={<LensCatalogPdfPage />} />
-        <Route path="lens-catalog/:id" element={<LensDetail />} />
-        <Route path="pricelist" element={<Pricelist />} />
-        <Route path="pricelist/new" element={<AdminOnly><PricelistCreate /></AdminOnly>} />
-        <Route path="pricelist/:id/edit" element={<AdminOnly><PricelistEdit /></AdminOnly>} />
-        <Route path="pricelist/:id" element={<PricelistDetail />} />
-        <Route path="pricelist-rx" element={<PricelistRx />} />
-        <Route path="pricelist-rx/new" element={<AdminOnly><PricelistCreate /></AdminOnly>} />
-        <Route path="pricelist-rx/:id/edit" element={<AdminOnly><PricelistEdit /></AdminOnly>} />
-        <Route path="pricelist-rx/:id" element={<PricelistDetail />} />
-        <Route path="pricelist-mkl" element={<PricelistMkl />} />
-        <Route path="pricelist-mkl/new" element={<AdminOnly><PricelistCreate /></AdminOnly>} />
-        <Route path="pricelist-mkl/:id/edit" element={<AdminOnly><PricelistEdit /></AdminOnly>} />
-        <Route path="pricelist-mkl/:id" element={<PricelistDetail />} />
-        <Route path="reports" element={<Reports />} />
-        <Route path="reports/expenses" element={<AdminOnly><ReportsExpenses /></AdminOnly>} />
-        <Route path="reports/encashment" element={<AdminOnly><ReportsEncashment /></AdminOnly>} />
-        <Route path="reports/central-cash" element={<AdminOnly><ReportsCentralCash /></AdminOnly>} />
-        <Route path="reports/analytics/point" element={<AdminOnly><ReportsAnalyticsPoint /></AdminOnly>} />
-        <Route path="reports/analytics/consultant" element={<AdminOnly><ReportsAnalyticsConsultant /></AdminOnly>} />
-        <Route path="reports/debts-summary" element={<AdminOnly><ReportsDebtsSummary /></AdminOnly>} />
-        <Route path="reports/withholding" element={<AdminOnly><ReportsWithholding /></AdminOnly>} />
-        <Route path="reports/my-debts-stats" element={<ReportsDebtsSummary consultantSelfView />} />
-        <Route path="reports/:id/edit" element={<AdminOnly><ReportNew /></AdminOnly>} />
-        <Route path="reports/new" element={<ReportNew />} />
-        <Route path="schedule-management" element={<AdminOnly><ScheduleManagement /></AdminOnly>} />
-        <Route path="schedule-confirmations" element={<AdminOnly><ScheduleConfirmationsReport /></AdminOnly>} />
-        <Route path="supply-tickets" element={<SupplyTickets />} />
-        <Route path="tasks" element={<Tasks />} />
-        <Route path="training/course/new" element={<AdminOnly><TrainingCourseBuilder /></AdminOnly>} />
-        <Route path="training/course/:id/edit" element={<AdminOnly><TrainingCourseBuilder /></AdminOnly>} />
-        <Route path="training/course/:id" element={<TrainingCoursePlayer />} />
-        <Route path="training" element={<Training />} />
-        <Route path="training/new" element={<AdminOnly><TrainingArticleForm /></AdminOnly>} />
-        <Route path="training/:id/edit" element={<AdminOnly><TrainingArticleForm /></AdminOnly>} />
-        <Route path="training/:id" element={<TrainingArticleView />} />
-        <Route path="normative-acts" element={<NormativeActs />} />
-        <Route path="normative-acts/report" element={<AdminOnly><NormativeActsReport /></AdminOnly>} />
-        <Route path="normative-acts/new" element={<AdminOnly><NormativeActForm /></AdminOnly>} />
-        <Route path="normative-acts/:id/edit" element={<AdminOnly><NormativeActForm /></AdminOnly>} />
-        <Route path="normative-acts/:id/report" element={<AdminOnly><NormativeActReport /></AdminOnly>} />
-        <Route path="normative-acts/:id" element={<NormativeActView />} />
-        <Route path="settings" element={<Settings />} />
-        <Route path="settings/users" element={<AdminOnly><Users /></AdminOnly>} />
-        <Route path="settings/groups/:groupId" element={<AdminOnly><GroupMembers /></AdminOnly>} />
-        <Route path="settings/users/:id" element={<AdminOnly><UserEdit /></AdminOnly>} />
-        <Route path="settings/references" element={<AdminOnly><References /></AdminOnly>} />
-        <Route path="settings/references/manufacturers" element={<AdminOnly><Manufacturers /></AdminOnly>} />
-        <Route path="settings/references/manufacturers/:id" element={<AdminOnly><ManufacturerForm /></AdminOnly>} />
-        <Route path="settings/references/features" element={<AdminOnly><Features /></AdminOnly>} />
-        <Route path="settings/references/features/:id" element={<AdminOnly><FeatureForm /></AdminOnly>} />
-        <Route path="settings/references/products" element={<AdminOnly><ProductsRef /></AdminOnly>} />
-        <Route path="settings/references/product-characteristics" element={<AdminOnly><ProductCharacteristicsRef /></AdminOnly>} />
-        <Route path="settings/references/colors" element={<AdminOnly><Colors /></AdminOnly>} />
-        <Route path="settings/references/colors/:id" element={<AdminOnly><ColorForm /></AdminOnly>} />
-        <Route path="settings/references/pricelist-groups" element={<AdminOnly><PricelistGroups /></AdminOnly>} />
-        <Route path="settings/references/pricelist-groups/:id" element={<AdminOnly><PricelistGroupForm /></AdminOnly>} />
-        <Route path="settings/references/pricelist-rx-groups" element={<AdminOnly><PricelistRxGroups /></AdminOnly>} />
-        <Route path="settings/references/pricelist-rx-groups/:id" element={<AdminOnly><PricelistGroupForm /></AdminOnly>} />
-        <Route path="settings/references/pricelist-mkl-groups" element={<AdminOnly><PricelistMklGroups /></AdminOnly>} />
-        <Route path="settings/references/pricelist-mkl-groups/:id" element={<AdminOnly><PricelistGroupForm /></AdminOnly>} />
-        <Route path="settings/references/warehouses" element={<AdminOnly><Warehouses /></AdminOnly>} />
-        <Route path="settings/references/warehouses/:id" element={<AdminOnly><WarehouseForm /></AdminOnly>} />
-        <Route path="settings/references/custom-field/:id" element={<AdminOnly><CustomFieldReference /></AdminOnly>} />
-        <Route path="settings/references/:refKey" element={<AdminOnly><RefBook /></AdminOnly>} />
-        <Route path="settings/permissions" element={<AdminOnly><SettingsPermissions /></AdminOnly>} />
-        <Route path="settings/custom-fields" element={<AdminOnly><CustomFieldsSettings /></AdminOnly>} />
-        <Route path="settings/pricelist-publications" element={<AdminOnly><PricelistPublications /></AdminOnly>} />
-        <Route path="settings/portal-tasks" element={<Navigate to="/tasks" replace />} />
-        <Route path="chat" element={<ChatMessenger />} />
-      </Route>
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+        <div className="flex items-center justify-end gap-2 px-3 py-2 border-b" style={{ borderColor: "var(--border)" }}>
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3 py-2 rounded-xl text-sm font-medium transition-opacity hover:opacity-90"
+            style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-primary)" }}
+          >
+            Закрыть
+          </button>
+        </div>
+        <div className="max-h-[85vh] overflow-auto">
+          <div className="p-4 sm:p-5">{children}</div>
+        </div>
+      </div>
+    </div>
   );
 }

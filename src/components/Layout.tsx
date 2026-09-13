@@ -2,13 +2,18 @@ import { useState, useRef, useEffect, useMemo } from "react";
 import { Outlet, useLocation, Navigate } from "react-router-dom";
 
 import { useAuth } from "../contexts/AuthContext";
-import { isPricelistSectionPath } from "../utils/pricelistRoutes";
 import { usePermissions } from "../contexts/PermissionsContext";
 import { useTheme } from "../contexts/ThemeContext";
 import { usePageTitle } from "../contexts/PageTitleContext";
 import Sidebar from "./Sidebar";
 import ChatWidget from "./ChatWidget";
+import ChatCallConnection from "./ChatCallConnection";
 import { isNativeAppShell, isNativeShellRetailPath } from "../utils/nativeApp";
+
+/** Страница /chat на мобильном — фиксированная высота без прокрутки всей страницы. */
+function isChatPagePath(pathname: string): boolean {
+  return pathname === "/chat";
+}
 
 const PRICELIST_SCROLL_KEYS: Record<string, string> = {
   "/pricelist": "pricelist-scroll",
@@ -18,6 +23,17 @@ const PRICELIST_SCROLL_KEYS: Record<string, string> = {
 
 function isPricelistListPath(pathname: string): boolean {
   return pathname === "/pricelist" || pathname === "/pricelist-rx" || pathname === "/pricelist-mkl";
+}
+
+/** Отчёты: список, форма, сводки — на всю ширину (особенно на мобильных). */
+function isReportsWideLayoutPath(pathname: string): boolean {
+  return (
+    pathname === "/reports" ||
+    pathname === "/reports/new" ||
+    pathname === "/reports/debts-summary" ||
+    pathname === "/reports/my-debts-stats" ||
+    /^\/reports\/\d+\/edit$/.test(pathname)
+  );
 }
 
 const SIDEBAR_COLLAPSED_KEY = "sidebar-collapsed";
@@ -47,6 +63,7 @@ export default function Layout() {
   };
   const mainRef = useRef<HTMLDivElement>(null);
   const location = useLocation();
+  const isChatPage = isChatPagePath(location.pathname);
   const { pageTitle } = usePageTitle();
   
   // На странице карточки прайслиста хедер не фиксируем
@@ -94,6 +111,7 @@ export default function Layout() {
       if (p.startsWith("/settings/custom-fields")) return "Дополнительные поля";
       if (p.startsWith("/settings/permissions")) return "Права доступа";
       if (p.startsWith("/settings/groups/")) return "Группа";
+      if (p === "/settings/users/bulk") return "Массовое редактирование";
       if (p.startsWith("/settings/users/")) return "Пользователь";
       if (p === "/settings/users") return "Пользователи";
       if (p.startsWith("/settings/references/manufacturers/")) return "Производитель";
@@ -186,19 +204,6 @@ export default function Layout() {
     const candidates = ["/", "/lens-catalog", "/pricelist", "/pricelist-rx", "/pricelist-mkl"] as const;
     const fallback = candidates.find((p) => isPathAllowed(p)) ?? "/pricelist";
     return <Navigate to={fallback} replace />;
-  }
-  if (
-    !isNativeAppShell() &&
-    user?.role === "manager" &&
-    location.pathname !== "/orders" &&
-    !location.pathname.startsWith("/orders/") &&
-    !isPricelistSectionPath(location.pathname) &&
-    !location.pathname.startsWith("/lens-catalog") &&
-    !location.pathname.startsWith("/supply-tickets") &&
-    !location.pathname.startsWith("/reports") &&
-    !location.pathname.startsWith("/chat")
-  ) {
-    return <Navigate to="/orders" replace />;
   }
 
   return (
@@ -349,7 +354,13 @@ export default function Layout() {
             </button>
           </div>
         ) : null}
-        <main id="app-main-scroll" ref={mainRef} className="flex-1 min-h-0 overflow-auto overflow-x-hidden relative">
+        <main
+          id="app-main-scroll"
+          ref={mainRef}
+          className={`flex-1 min-h-0 relative ${
+            isChatPage ? "overflow-hidden chat-page-main" : "overflow-auto overflow-x-hidden"
+          }`}
+        >
           {/* Декоративная подложка */}
           <div className="absolute inset-0 overflow-hidden pointer-events-none">
             {/* Градиентные круги с анимацией */}
@@ -388,13 +399,12 @@ export default function Layout() {
           
           {/* Контент: отчёты, сводки по долгам, карточка прайса — на всю ширину рабочей области */}
           <div
-            className={`relative z-10 mx-auto w-full px-4 py-4 sm:px-6 sm:py-6 lg:px-8 lg:py-8 ${
-              location.pathname === "/reports" ||
-              location.pathname === "/reports/debts-summary" ||
-              location.pathname === "/reports/my-debts-stats" ||
-              isPricelistDetail
-                ? "max-w-[min(1920px,100%)]"
-                : "max-w-7xl"
+            className={`relative z-10 mx-auto w-full max-w-[min(1920px,100%)] ${
+              isChatPage
+                ? "chat-page-outlet flex-1 min-h-0 h-auto max-w-none px-0 py-0 flex flex-col"
+                : isReportsWideLayoutPath(location.pathname) || isPricelistDetail
+                  ? "px-0 py-3 sm:px-6 sm:py-6 lg:px-8 lg:py-8"
+                  : "px-4 py-4 sm:px-6 sm:py-6 lg:px-8 lg:py-8 max-w-7xl"
             }`}
           >
             <Outlet />
@@ -402,6 +412,7 @@ export default function Layout() {
         </main>
       </div>
       {!isNativeAppShell() ? <ChatWidget hideLauncher /> : null}
+      {!isNativeAppShell() ? <ChatCallConnection /> : null}
     </div>
   );
 }

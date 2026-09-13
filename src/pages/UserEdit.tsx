@@ -1,8 +1,15 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Link, useParams, useNavigate } from "react-router-dom";
 import { api } from "../api";
-import type { UserItem, GroupItem } from "../api";
+import type { UserItem, GroupItem, ChatBirthdayReminderRuleInput } from "../api";
 import { useAuth } from "../contexts/AuthContext";
+import UserBirthdayChatReminders from "../components/UserBirthdayChatReminders";
+import {
+  birthDateMonthLabel,
+  birthDateToApi,
+  daysInBirthMonth,
+  parseBirthDateFromApi,
+} from "../utils/birthDate";
 
 const isNew = (id: string | undefined) => id === "new" || !id;
 
@@ -31,15 +38,24 @@ export default function UserEdit() {
   const [password, setPassword] = useState("");
   const [telegramId, setTelegramId] = useState("");
   const [phone, setPhone] = useState("");
-  const [birthDate, setBirthDate] = useState("");
+  const [birthMonth, setBirthMonth] = useState<number | "">("");
+  const [birthDay, setBirthDay] = useState<number | "">("");
+  const [scheduleColor, setScheduleColor] = useState("");
   const [isActive, setIsActive] = useState(true);
   const [selectedGroupIds, setSelectedGroupIds] = useState<Set<number>>(new Set());
   const [impersonateBusy, setImpersonateBusy] = useState(false);
+  const [birthdayReminderRules, setBirthdayReminderRules] = useState<ChatBirthdayReminderRuleInput[]>([]);
 
   useEffect(() => {
     if (isNew(id)) {
       setError("");
-      api.getGroups().then((g) => { setUser("new"); setGroups(g); }).catch((e) => setError(e instanceof Error ? e.message : "Ошибка")).finally(() => setLoading(false));
+      api.getGroups().then((g) => {
+          setUser("new");
+          setGroups(g);
+          setSelectedGroupIds(new Set());
+        })
+        .catch((e) => setError(e instanceof Error ? e.message : "Ошибка"))
+        .finally(() => setLoading(false));
       return;
     }
     const uid = Number(id);
@@ -55,7 +71,10 @@ export default function UserEdit() {
         setPatronymic(u.patronymic ?? "");
         setTelegramId(u.telegram_id ?? "");
         setPhone(u.phone ?? "");
-        setBirthDate(u.birth_date ?? "");
+        const bd = parseBirthDateFromApi(u.birth_date);
+        setBirthMonth(bd?.month ?? "");
+        setBirthDay(bd?.day ?? "");
+        setScheduleColor(u.schedule_color ?? "");
         setIsActive(u.is_active);
         setSelectedGroupIds(new Set(u.group_ids ?? []));
       })
@@ -78,6 +97,18 @@ export default function UserEdit() {
       setImpersonateBusy(false);
     }
   };
+
+  const birthDateIso = useMemo(() => {
+    if (birthMonth === "" || birthDay === "") return "";
+    return birthDateToApi(Number(birthMonth), Number(birthDay)) ?? "";
+  }, [birthMonth, birthDay]);
+
+  const maxBirthDay = birthMonth === "" ? 31 : daysInBirthMonth(Number(birthMonth));
+
+  useEffect(() => {
+    if (birthDay === "" || birthMonth === "") return;
+    if (Number(birthDay) > maxBirthDay) setBirthDay(maxBirthDay);
+  }, [birthMonth, maxBirthDay, birthDay]);
 
   const toggleGroup = (gid: number) => {
     setSelectedGroupIds((prev) => {
@@ -102,7 +133,7 @@ export default function UserEdit() {
         patronymic: patronymic.trim() || undefined,
         telegram_id: telegramId.trim() || undefined,
         phone: phone.trim() || undefined,
-        birth_date: birthDate || undefined,
+        birth_date: birthDateIso || undefined,
       })
         .then((created) => {
           const promises = [...selectedGroupIds].map((gid) => api.addGroupMember(gid, created.id));
@@ -114,22 +145,40 @@ export default function UserEdit() {
     }
     if (!user) return;
     const uid = user.id;
+    for (const r of birthdayReminderRules) {
+      if (r.enabled && r.recipient_user_ids.length === 0) {
+        setError("В каждом включённом правиле напоминания укажите хотя бы одного получателя");
+        setSaving(false);
+        return;
+      }
+    }
     const payload: Parameters<typeof api.updateUser>[1] = {
+      username: username.trim() || undefined,
       last_name: lastName.trim() || undefined,
       first_name: firstName.trim() || undefined,
       patronymic: patronymic.trim() || undefined,
       telegram_id: telegramId.trim() || undefined,
       phone: phone.trim() || undefined,
-      birth_date: birthDate || null,
+      birth_date: birthDateIso || null,
+      schedule_color: scheduleColor.trim() ? scheduleColor.trim() : null,
       is_active: isActive,
     };
-    if (password.trim()) payload.password = password;
-    api.updateUser(uid, payload).then(() => {
-      const prev = new Set(user.group_ids ?? []);
-      const add = [...selectedGroupIds].filter((gid) => !prev.has(gid));
-      const remove = [...prev].filter((gid) => !selectedGroupIds.has(gid));
-      return Promise.all([...add.map((gid) => api.addGroupMember(gid, uid)), ...remove.map((gid) => api.removeGroupMember(gid, uid))]);
-    }).then(() => navigate("/settings/users")).catch((e) => setError(e instanceof Error ? e.message : "Ошибка")).finally(() => setSaving(false));
+    if (password.trim()) payload.password = password.trim();
+    api
+      .updateUser(uid, payload)
+      .then(() => {
+        const prev = new Set(user.group_ids ?? []);
+        const add = [...selectedGroupIds].filter((gid) => !prev.has(gid));
+        const remove = [...prev].filter((gid) => !selectedGroupIds.has(gid));
+        return Promise.all([
+          ...add.map((gid) => api.addGroupMember(gid, uid)),
+          ...remove.map((gid) => api.removeGroupMember(gid, uid)),
+          api.putBirthdayChatReminders(uid, birthdayReminderRules),
+        ]);
+      })
+      .then(() => navigate("/settings/users"))
+      .catch((e) => setError(e instanceof Error ? e.message : "Ошибка"))
+      .finally(() => setSaving(false));
   };
 
   if (loading) {
@@ -248,15 +297,81 @@ export default function UserEdit() {
             />
           </div>
           <div>
-            <label className="block text-sm font-medium mb-2" style={{ color: "var(--text-secondary)" }}>Дата рождения</label>
-            <input
-              type="date"
-              value={birthDate}
-              onChange={(e) => setBirthDate(e.target.value)}
-              className="w-full rounded-xl border outline-none transition-colors focus:border-[var(--accent)] focus:ring-1 focus:ring-[var(--accent)]"
-              style={inputStyle}
-            />
+            <label className="block text-sm font-medium mb-2" style={{ color: "var(--text-secondary)" }}>
+              День рождения
+            </label>
+            <div className="grid grid-cols-2 gap-3">
+              <select
+                value={birthMonth === "" ? "" : String(birthMonth)}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setBirthMonth(v === "" ? "" : Number(v));
+                }}
+                className="w-full rounded-xl border outline-none transition-colors focus:border-[var(--accent)] focus:ring-1 focus:ring-[var(--accent)]"
+                style={inputStyle}
+              >
+                <option value="">Месяц</option>
+                {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
+                  <option key={m} value={m}>
+                    {birthDateMonthLabel(m)}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={birthDay === "" ? "" : String(birthDay)}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setBirthDay(v === "" ? "" : Number(v));
+                }}
+                disabled={birthMonth === ""}
+                className="w-full rounded-xl border outline-none transition-colors focus:border-[var(--accent)] focus:ring-1 focus:ring-[var(--accent)] disabled:opacity-50"
+                style={inputStyle}
+              >
+                <option value="">День</option>
+                {Array.from({ length: maxBirthDay }, (_, i) => i + 1).map((d) => (
+                  <option key={d} value={d}>
+                    {d}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <p className="text-xs mt-1.5" style={{ color: "var(--text-tertiary)" }}>
+              Указывается только день и месяц (без года).
+            </p>
           </div>
+          {!isCreate && (
+            <div>
+              <label className="block text-sm font-medium mb-2" style={{ color: "var(--text-secondary)" }}>
+                Цвет сотрудника (для расписания)
+              </label>
+              <div className="flex items-center gap-3">
+                <input
+                  type="color"
+                  value={scheduleColor || "#000000"}
+                  onChange={(e) => setScheduleColor(e.target.value)}
+                  className="h-10 w-14 rounded-lg border"
+                  style={{ backgroundColor: "transparent", borderColor: "var(--border)" }}
+                  aria-label="Выбор цвета сотрудника"
+                />
+                <input
+                  type="text"
+                  value={scheduleColor}
+                  onChange={(e) => setScheduleColor(e.target.value)}
+                  placeholder="#rrggbb"
+                  className="flex-1 rounded-xl border outline-none transition-colors focus:border-[var(--accent)] focus:ring-1 focus:ring-[var(--accent)]"
+                  style={inputStyle}
+                />
+                <button
+                  type="button"
+                  onClick={() => setScheduleColor("")}
+                  className="px-4 py-2 rounded-xl text-sm font-medium transition-opacity hover:opacity-90"
+                  style={{ backgroundColor: "var(--bg-secondary)", color: "var(--text-primary)", border: "1px solid var(--border)" }}
+                >
+                  Очистить
+                </button>
+              </div>
+            </div>
+          )}
           <label className="flex items-center gap-2 cursor-pointer">
             <input
               type="checkbox"
@@ -268,6 +383,19 @@ export default function UserEdit() {
             <span className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>Блокировать пользователя</span>
           </label>
         </div>
+
+        {!isCreate && me?.is_admin ? (
+          <div className="rounded-2xl p-6 space-y-4" style={{ backgroundColor: "var(--bg-primary)", border: "1px solid var(--border)" }}>
+            <h3 className="text-sm font-semibold uppercase tracking-wider" style={{ color: "var(--text-secondary)" }}>
+              Напоминания о дне рождения в чате
+            </h3>
+            <UserBirthdayChatReminders
+              userId={user.id}
+              birthDate={birthDateIso}
+              onRulesChange={setBirthdayReminderRules}
+            />
+          </div>
+        ) : null}
 
         <div className="rounded-2xl p-6 space-y-4" style={{ backgroundColor: "var(--bg-primary)", border: "1px solid var(--border)" }}>
           <h3 className="text-sm font-semibold uppercase tracking-wider" style={{ color: "var(--text-secondary)" }}>Группы</h3>

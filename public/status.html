@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="robots" content="noindex" />
+    <title>Диагностика входа — Mosoptika</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: #f4f5f7;
+        color: #172b4d;
+        line-height: 1.45;
+        -webkit-text-size-adjust: 100%;
+      }
+      .wrap { max-width: 640px; margin: 0 auto; padding: 16px; padding-bottom: 32px; }
+      .card {
+        background: #fff;
+        border: 1px solid #dfe1e6;
+        border-radius: 16px;
+        padding: 20px;
+        box-shadow: 0 8px 24px rgba(0,0,0,.06);
+      }
+      h1 { margin: 0 0 8px; font-size: 1.35rem; }
+      .sub { margin: 0 0 20px; color: #5e6c84; font-size: .92rem; }
+      .err-box {
+        background: rgba(222,53,11,.08);
+        border: 1px solid rgba(222,53,11,.25);
+        color: #bf2600;
+        border-radius: 12px;
+        padding: 14px;
+        margin-bottom: 16px;
+        font-size: .9rem;
+      }
+      .check {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px;
+        border: 1px solid #dfe1e6;
+        border-radius: 12px;
+        background: #fafbfc;
+        margin-bottom: 10px;
+      }
+      .check-title { font-weight: 600; font-size: .95rem; }
+      .check-detail { color: #5e6c84; font-size: .85rem; margin-top: 4px; word-break: break-word; }
+      .badge {
+        flex-shrink: 0;
+        align-self: flex-start;
+        font-size: .72rem;
+        font-weight: 700;
+        padding: 4px 8px;
+        border-radius: 999px;
+      }
+      .badge.ok { color: #16a34a; background: rgba(22,163,74,.12); }
+      .badge.fail { color: #bf2600; background: rgba(222,53,11,.12); }
+      .badge.wait { color: #5e6c84; background: #ebecf0; }
+      .meta {
+        background: #fafbfc;
+        border: 1px solid #dfe1e6;
+        border-radius: 12px;
+        padding: 14px;
+        font-size: .85rem;
+        margin: 16px 0;
+        word-break: break-word;
+      }
+      .meta div + div { margin-top: 6px; }
+      .muted { color: #5e6c84; }
+      .actions { display: flex; flex-wrap: wrap; gap: 10px; }
+      button, a.btn {
+        appearance: none;
+        border: none;
+        border-radius: 12px;
+        padding: 12px 16px;
+        font-size: .92rem;
+        font-weight: 600;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        min-height: 44px;
+      }
+      .primary { background: #0052cc; color: #fff; }
+      .secondary { background: #fafbfc; color: #172b4d; border: 1px solid #dfe1e6; }
+      .foot { margin-top: 18px; padding-top: 14px; border-top: 1px solid #dfe1e6; font-size: .78rem; color: #5e6c84; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <h1>Диагностика входа</h1>
+        <p class="sub">Страница работает без авторизации. Если при входе крутится загрузка — сделайте скриншот и отправьте администратору.</p>
+        <div id="last-error" class="err-box" style="display:none"></div>
+        <div id="checks"></div>
+        <div class="meta" id="meta"></div>
+        <div class="actions">
+          <button type="button" class="primary" id="btn-retry">Повторить проверку</button>
+          <button type="button" class="secondary" id="btn-clear">Сбросить сессию</button>
+          <button type="button" class="secondary" id="btn-update">Обновить приложение</button>
+          <a class="btn secondary" href="/login">На страницу входа</a>
+        </div>
+        <div class="foot">Mosoptika • логин обычно «Фамилия Имя». Если «Сессия» в ошибке — нажмите «Сбросить сессию».</div>
+      </div>
+    </div>
+    <script>
+      (function () {
+        var AUTH_LAST_ERROR_KEY = "auth_last_error";
+        var AUTH_USER_CACHE_KEY = "auth_user_cache";
+        var checksEl = document.getElementById("checks");
+        var metaEl = document.getElementById("meta");
+        var lastErrEl = document.getElementById("last-error");
+
+        function apiOrigins() {
+          var out = [];
+          var host = location.hostname;
+          if (host === "localhost" || host === "127.0.0.1") {
+            out.push("https://mosoptika-study.ru");
+          }
+          out.push("");
+          return out;
+        }
+
+        function fetchWithTimeout(url, opts, ms) {
+          opts = opts || {};
+          ms = ms || 20000;
+          var ctrl = new AbortController();
+          var t = setTimeout(function () { ctrl.abort(); }, ms);
+          opts.signal = ctrl.signal;
+          return fetch(url, opts).finally(function () { clearTimeout(t); });
+        }
+
+        async function checkApiHealth() {
+          var lastErr = "неизвестная ошибка";
+          for (var i = 0; i < apiOrigins().length; i++) {
+            var base = apiOrigins()[i];
+            var url = base + "/api/health?_=" + Date.now();
+            try {
+              var res = await fetchWithTimeout(url, { cache: "no-store" });
+              if (res.ok) {
+                var data = {};
+                try { data = await res.json(); } catch (e) {}
+                return {
+                  ok: true,
+                  detail: data.ts ? ("сервер отвечает, " + data.ts) : "сервер отвечает",
+                };
+              }
+              lastErr = "HTTP " + res.status + (base ? " (" + base + ")" : "");
+            } catch (err) {
+              lastErr = fmtErr(err) + (base ? " (" + base + ")" : "");
+            }
+          }
+          return { ok: false, detail: lastErr };
+        }
+
+        function fmtErr(err) {
+          if (err && err.name === "AbortError") return "Превышено время ожидания ответа сервера";
+          if (err instanceof TypeError) return "Нет связи с сервером. Проверьте интернет.";
+          return (err && err.message) ? err.message : String(err);
+        }
+
+        function readLastError() {
+          try {
+            var raw = sessionStorage.getItem(AUTH_LAST_ERROR_KEY);
+            if (!raw) return null;
+            var p = JSON.parse(raw);
+            return p && p.message ? p : null;
+          } catch (e) { return null; }
+        }
+
+        function renderCheck(label, status, detail) {
+          var badge = status === "ok" ? "OK" : status === "fail" ? "Ошибка" : "…";
+          var cls = status === "ok" ? "ok" : status === "fail" ? "fail" : "wait";
+          return (
+            '<div class="check">' +
+              '<div><div class="check-title">' + label + '</div><div class="check-detail">' + detail + '</div></div>' +
+              '<span class="badge ' + cls + '">' + badge + '</span>' +
+            '</div>'
+          );
+        }
+
+        function tokenPreview() {
+          var t = localStorage.getItem("token");
+          return t ? t.slice(0, 12) + "… (" + t.length + " симв.)" : "нет";
+        }
+
+        function cachedUserPreview() {
+          try {
+            var raw = localStorage.getItem(AUTH_USER_CACHE_KEY);
+            if (!raw) return "нет";
+            var u = JSON.parse(raw);
+            return u && u.username ? u.username + " (id " + (u.id || "?") + ")" : raw.slice(0, 80);
+          } catch (e) { return "повреждён"; }
+        }
+
+        async function runChecks() {
+          checksEl.innerHTML = renderCheck("Проверка", "wait", "выполняется…");
+          var html = "";
+          var token = localStorage.getItem("token");
+
+          var apiCheck = await checkApiHealth();
+          html += renderCheck(
+            "API сервера",
+            apiCheck.ok ? "ok" : "fail",
+            apiCheck.detail
+          );
+
+          html += renderCheck(
+            "Интернет в браузере",
+            navigator.onLine ? "ok" : "fail",
+            navigator.onLine ? "онлайн" : "офлайн"
+          );
+
+          try {
+            var verRes = await fetchWithTimeout("/build-version.json?_=" + Date.now(), { cache: "no-store" });
+            if (verRes.ok) {
+              var ver = {};
+              try { ver = await verRes.json(); } catch (e) {}
+              var localVer = localStorage.getItem("crm_build_id") || "неизвестно";
+              var serverVer = ver.builtAt || ver.version || "?";
+              var same = localVer === serverVer;
+              html += renderCheck(
+                "Версия приложения",
+                same ? "ok" : "fail",
+                same
+                  ? ("актуальная: " + serverVer)
+                  : ("на сервере " + serverVer + ", у вас " + localVer + " — нажмите «Обновить приложение»")
+              );
+            }
+          } catch (e) {}
+
+          if (!token) {
+            html += renderCheck("Сессия", "ok", "токен не сохранён — нормально до входа");
+          } else {
+            try {
+              var meRes = await fetchWithTimeout("/api/auth/me", {
+                headers: { Authorization: "Bearer " + token },
+                cache: "no-store",
+              });
+              if (meRes.ok) {
+                var me = {};
+                try { me = await meRes.json(); } catch (e) {}
+                html += renderCheck("Сессия", "ok", me.username ? "вход: " + me.username : "токен принят");
+              } else if (meRes.status === 401) {
+                html += renderCheck("Сессия", "fail", "токен устарел — войдите заново");
+              } else {
+                var txt = "";
+                try { txt = await meRes.text(); } catch (e) {}
+                html += renderCheck("Сессия", "fail", "HTTP " + meRes.status + (txt ? ": " + txt.slice(0, 100) : ""));
+              }
+            } catch (err) {
+              html += renderCheck("Сессия", "fail", fmtErr(err));
+            }
+          }
+
+          checksEl.innerHTML = html;
+          metaEl.innerHTML =
+            '<div><span class="muted">Токен: </span>' + tokenPreview() + '</div>' +
+            '<div><span class="muted">Кэш пользователя: </span>' + cachedUserPreview() + '</div>' +
+            '<div><span class="muted">Браузер: </span>' + navigator.userAgent + '</div>';
+
+          var last = readLastError();
+          if (last) {
+            lastErrEl.style.display = "block";
+            lastErrEl.innerHTML =
+              "<strong>Последняя ошибка авторизации</strong><br>" + last.message +
+              "<br><span class='muted'>" + new Date(last.at).toLocaleString("ru-RU") + "</span>";
+          } else {
+            lastErrEl.style.display = "none";
+          }
+        }
+
+        document.getElementById("btn-retry").addEventListener("click", function () { runChecks(); });
+        document.getElementById("btn-clear").addEventListener("click", function () {
+          localStorage.removeItem("token");
+          localStorage.removeItem(AUTH_USER_CACHE_KEY);
+          try { sessionStorage.removeItem(AUTH_LAST_ERROR_KEY); } catch (e) {}
+          runChecks();
+        });
+
+        document.getElementById("btn-update").addEventListener("click", function () {
+          localStorage.removeItem("crm_build_id");
+          try { sessionStorage.removeItem("crm_build_reload_once"); } catch (e) {}
+          var tasks = [];
+          if ("caches" in window) {
+            tasks.push(caches.keys().then(function (keys) {
+              return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+            }));
+          }
+          if ("serviceWorker" in navigator) {
+            tasks.push(navigator.serviceWorker.getRegistrations().then(function (regs) {
+              return Promise.all(regs.map(function (r) { return r.unregister(); }));
+            }));
+          }
+          Promise.all(tasks).finally(function () { location.href = "/?_" + Date.now(); });
+        });
+
+        runChecks();
+      })();
+    </script>
+  </body>
+</html>

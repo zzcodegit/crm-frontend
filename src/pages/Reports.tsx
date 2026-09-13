@@ -1,11 +1,18 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import type { DragEvent } from "react";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
-import type { ReportItem, WarehouseItem } from "../api";
-import { normalizeReportTableColumnOrder, REPORT_TABLE_COLUMN_LABELS } from "../reportsTableColumns";
+import { warehousesVisibleInReports, type ReportItem, type WarehouseItem } from "../api";
+import {
+  normalizeReportTableColumnOrder,
+  getAllReportTableColumnKeys,
+  mergeReportTableColumnLabels,
+  reportColumnLabelsToOverrides,
+  resolveReportColumnLabel,
+} from "../reportsTableColumns";
 import { reportBusinessDayYmd } from "./reportsAnalyticsUtils";
 import { isPdfUrl, isHeicUrl, fileFileName, ReportImageLightbox } from "./reportsShared";
+import ReportsSubnav from "../components/ReportsSubnav";
 
 /** ФИО продавца в доплате (в JSON могут быть разные ключи или только старый формат). */
 function extraPaymentSellerName(p: Record<string, unknown>): string {
@@ -32,6 +39,91 @@ const YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
 const REPORTS_NO_WAREHOUSE_ID = -1;
 const REPORTS_NO_WAREHOUSE_NAME = "Без точки";
 
+/** Зачёт долга в блоке «Взято» (виртуальный id, не из справочника). */
+const TAKE_DEBT_REASON_VIRTUAL_ID = -999001;
+const TAKE_DEBT_REASON_LABEL = "Забрать долг";
+type VzyalaDetailPopupRow = {
+  order_number?: string;
+  amount?: number;
+  taken_reason_id?: number | null;
+  taken_source_id?: number | null;
+  taken_reason_name?: string | null;
+  taken_source_name?: string | null;
+  linked_debt_row_uid?: string | null;
+  linked_debt_report_id?: number | null;
+  linked_debt_date?: string | null;
+  order_percent?: number | null;
+  report_month?: string | null;
+  warehouse_id?: number | null;
+  warehouse_name?: string | null;
+};
+
+function vzyalaReasonLabel(
+  row: VzyalaDetailPopupRow,
+  takenReasonById: Record<number, string>
+): string {
+  const fromApi = (row.taken_reason_name ?? "").trim();
+  if (fromApi) return fromApi;
+  const id = row.taken_reason_id;
+  if (id === TAKE_DEBT_REASON_VIRTUAL_ID || (row.linked_debt_row_uid ?? "").trim()) {
+    return TAKE_DEBT_REASON_LABEL;
+  }
+  if (id != null && takenReasonById[id]) return takenReasonById[id]!;
+  return "—";
+}
+
+function vzyalaSourceLabel(
+  row: VzyalaDetailPopupRow,
+  takenSourceById: Record<number, string>
+): string {
+  const fromApi = (row.taken_source_name ?? "").trim();
+  if (fromApi) return fromApi;
+  const id = row.taken_source_id;
+  if (id != null && takenSourceById[id]) return takenSourceById[id]!;
+  return "—";
+}
+
+type VzyalaPopupState = {
+  rows: VzyalaDetailPopupRow[];
+  columns: {
+    showOrder: boolean;
+    showOrderPercent: boolean;
+    showDate: boolean;
+    showPoint: boolean;
+    showDebtDate: boolean;
+  };
+};
+
+function vzyalaPointLabel(row: VzyalaDetailPopupRow, warehouses: WarehouseItem[]): string {
+  const fromApi = (row.warehouse_name ?? "").trim();
+  if (fromApi) return fromApi;
+  if (row.warehouse_id != null) {
+    const name = warehouses.find((w) => w.id === row.warehouse_id)?.name;
+    if (name) return name;
+  }
+  return "—";
+}
+
+function computeVzyalaColumnFlags(rows: VzyalaDetailPopupRow[]): VzyalaPopupState["columns"] {
+  return {
+    showOrder: rows.some((p) => (p.order_number ?? "").trim() !== ""),
+    showOrderPercent: rows.some((p) => p.order_percent != null),
+    showDate: rows.some((p) => (p.report_month ?? "").trim() !== ""),
+    showPoint:
+      rows.some((p) => p.warehouse_id != null || (p.warehouse_name ?? "").trim() !== "") ||
+      rows.some((p) => (p.linked_debt_row_uid ?? "").trim() !== ""),
+    showDebtDate:
+      rows.some((p) => (p.linked_debt_date ?? "").trim() !== "") ||
+      rows.some((p) => (p.linked_debt_row_uid ?? "").trim() !== "") ||
+      rows.some((p) => p.taken_reason_id === TAKE_DEBT_REASON_VIRTUAL_ID),
+  };
+}
+
+function vzyalaPopupRowsEqual(a: VzyalaDetailPopupRow[], b: VzyalaDetailPopupRow[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((row, i) => JSON.stringify(row) === JSON.stringify(b[i]));
+}
+
 /** Дата/время отчёта в списке: момент отправки (`submitted_at`); без него — старые данные по `created_at`. */
 function reportSubmittedOrCreatedAt(r: ReportItem): string | null {
   return r.submitted_at ?? r.created_at ?? null;
@@ -49,6 +141,24 @@ function sortReportsNewestFirst(a: ReportItem, b: ReportItem): number {
 function parseYmdParam(v: string | null, fallback: string): string {
   if (v && YMD_RE.test(v)) return v;
   return fallback;
+}
+
+function addDaysYmd(ymd: string, deltaDays: number): string {
+  if (!YMD_RE.test(ymd)) return ymd;
+  const d = new Date(ymd + "T12:00:00");
+  if (Number.isNaN(d.getTime())) return ymd;
+  d.setDate(d.getDate() + deltaDays);
+  return d.toISOString().slice(0, 10);
+}
+
+function diffDaysYmd(fromYmd: string, toYmd: string): number {
+  if (!YMD_RE.test(fromYmd) || !YMD_RE.test(toYmd)) return 0;
+  const a = new Date(fromYmd + "T12:00:00");
+  const b = new Date(toYmd + "T12:00:00");
+  const ta = a.getTime();
+  const tb = b.getTime();
+  if (Number.isNaN(ta) || Number.isNaN(tb)) return 0;
+  return Math.round((tb - ta) / 86400000);
 }
 
 function formatReportPeriodDisplay(v: string | null | undefined): string {
@@ -80,7 +190,7 @@ export default function Reports() {
   const location = useLocation();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [me, setMe] = useState<{ is_consultant?: boolean; is_admin?: boolean; is_manager?: boolean } | null>(null);
+  const [me, setMe] = useState<{ is_consultant?: boolean; is_admin?: boolean; is_manager?: boolean; is_reportnik?: boolean } | null>(null);
   const [successMessage, setSuccessMessage] = useState("");
   const [reports, setReports] = useState<ReportItem[]>([]);
   const [warehouses, setWarehouses] = useState<WarehouseItem[]>([]);
@@ -97,9 +207,7 @@ export default function Reports() {
   const [expensesPopup, setExpensesPopup] = useState<
     { expense_article_id: number; expense_article_name: string; amount: number }[] | null
   >(null);
-  const [vzyalaPopup, setVzyalaPopup] = useState<
-    { order_number?: string; amount?: number; taken_reason_id?: number | null; taken_source_id?: number | null; order_percent?: number | null; report_month?: string | null; warehouse_id?: number | null }[] | null
-  >(null);
+  const [vzyalaPopup, setVzyalaPopup] = useState<VzyalaPopupState | null>(null);
   const [dolgPopup, setDolgPopup] = useState<
     { order_number?: string; amount?: number; debt_reason_id?: number | null; order_percent?: number | null; report_month?: string | null; warehouse_id?: number | null }[] | null
   >(null);
@@ -126,13 +234,10 @@ export default function Reports() {
    */
   let dateFrom: string;
   let dateTo: string;
-  if (
-    me !== null &&
-    me.is_consultant === true &&
-    me.is_admin !== true &&
-    me.is_manager !== true &&
-    !hasExplicitDateRange
-  ) {
+  const isReportnik = me?.is_reportnik === true;
+  const isAdminOrManagerOrReportnik = me?.is_admin === true || me?.is_manager === true || isReportnik;
+
+  if (me !== null && me.is_consultant === true && !isAdminOrManagerOrReportnik && !hasExplicitDateRange) {
     dateFrom = "";
     dateTo = "";
   } else {
@@ -194,6 +299,20 @@ export default function Reports() {
     });
   };
 
+  const shiftDateRange = (direction: -1 | 1) => {
+    if (!dateFrom || !dateTo) {
+      resetDateRangeToToday();
+      return;
+    }
+    const span = diffDaysYmd(dateFrom, dateTo);
+    const step = Math.max(1, span + 1); // 1 день или длина диапазона
+    const delta = direction * step;
+    setFilterSearchParams((p) => {
+      p.set("from", addDaysYmd(dateFrom, delta));
+      p.set("to", addDaysYmd(dateTo, delta));
+    });
+  };
+
   const setWarehousePoint = (name: string | null) => {
     setFilterSearchParams((p) => {
       if (name == null || name === "") p.delete("point");
@@ -211,6 +330,7 @@ export default function Reports() {
   const draggedReportColumn = useRef<string | null>(null);
 
   const [reportColumnOrder, setReportColumnOrder] = useState<string[]>([]);
+  const [reportColumnLabels, setReportColumnLabels] = useState<Record<string, string>>({});
   const [columnsSettingsLoading, setColumnsSettingsLoading] = useState(false);
   const [columnsCustomizeMode, setColumnsCustomizeMode] = useState(false);
   const [columnsSaveMineLoading, setColumnsSaveMineLoading] = useState(false);
@@ -235,33 +355,59 @@ export default function Reports() {
   }, [warehouseFilterOpen]);
 
   const isConsultant = me?.is_consultant ===  true;
-  const canSeeAllReports = me?.is_admin === true || me?.is_manager === true;
+  const canSeeAllReports = isAdminOrManagerOrReportnik;
   const canSeeAllPoints = me?.is_admin === true;
   /** Панель: даты, точка, скрыть отправивших, отчёты расходов/инкассации, аналитика, XLSX — только администратору CRM */
   const isReportsAdminToolbar = me?.is_admin === true;
 
+  const allReportColumnKeys = useMemo(
+    () => getAllReportTableColumnKeys({ includeActions: me?.is_admin === true }),
+    [me?.is_admin]
+  );
+
+  const hiddenReportColumns = useMemo(
+    () => allReportColumnKeys.filter((k) => !reportColumnOrder.includes(k)),
+    [allReportColumnKeys, reportColumnOrder]
+  );
+
   useEffect(() => {
     api.getMe().then(setMe).catch(() => setMe(null));
   }, []);
+
+  const applyReportColumnsSettings = (
+    res: {
+      default_columns: string[];
+      default_labels?: Record<string, string>;
+      mine_columns: string[] | null;
+      mine_labels?: Record<string, string> | null;
+    },
+    isAdmin: boolean
+  ) => {
+    const def = normalizeReportTableColumnOrder(res.default_columns, {
+      includeActions: isAdmin,
+      appendMissing: false,
+    });
+    const mine =
+      res.mine_columns != null
+        ? normalizeReportTableColumnOrder(res.mine_columns, { includeActions: isAdmin, appendMissing: false })
+        : null;
+    setReportColumnOrder(mine ?? def);
+    const defaultLabels = mergeReportTableColumnLabels(res.default_labels);
+    setReportColumnLabels(
+      res.mine_labels != null ? mergeReportTableColumnLabels(res.mine_labels) : defaultLabels
+    );
+  };
 
   useEffect(() => {
     if (me === null) return;
     setColumnsSettingsLoading(true);
     api
       .getReportsTableColumns()
-      .then((res) => {
-        const inc = me.is_admin === true;
-        const def = normalizeReportTableColumnOrder(res.default_columns, { includeActions: inc });
-        const mine =
-          res.mine_columns != null
-            ? normalizeReportTableColumnOrder(res.mine_columns, { includeActions: inc })
-            : null;
-        setReportColumnOrder(mine ?? def);
-      })
+      .then((res) => applyReportColumnsSettings(res, me.is_admin === true))
       .catch(() => {
         const inc = me.is_admin === true;
-        const fallback = normalizeReportTableColumnOrder(null, { includeActions: inc });
-        setReportColumnOrder(fallback);
+        setReportColumnOrder(normalizeReportTableColumnOrder(null, { includeActions: inc }));
+        setReportColumnLabels(mergeReportTableColumnLabels());
       })
       .finally(() => setColumnsSettingsLoading(false));
   }, [me]);
@@ -283,8 +429,8 @@ export default function Reports() {
     }
   }, [location.state, location.search, navigate]);
 
-  useEffect(() => {
-    if (me === null) return;
+  const loadReportsData = useCallback(() => {
+    if (me === null) return Promise.resolve();
     setListLoading(true);
     const draftPromise = isConsultant
       ? api.reports.getDraft().catch((e) => {
@@ -292,38 +438,44 @@ export default function Reports() {
           return null;
         })
       : Promise.resolve(null);
-    Promise.all([
-      api.reports.list(),
+    return Promise.all([
+      api.reports.list(dateFrom && dateTo ? { dateFrom, dateTo } : undefined),
       api.ref.warehouses.list(),
       api.ref.expenseArticles.list().catch(() => [] as { id: number; name: string }[]),
       api.ref.takenReasons.list().catch(() => [] as { id: number; name: string }[]),
       api.ref.takenSources.list().catch(() => [] as { id: number; name: string }[]),
       api.ref.debtReasons.list().catch(() => [] as { id: number; name: string }[]),
       draftPromise,
-    ]).then(([reps, whs, expenseArts, takenReasons, takenSources, debtReasons, draft]) => {
-      setReports(reps);
-      setWarehouses(whs);
-      const m: Record<number, string> = {};
-      for (const a of expenseArts) m[a.id] = a.name;
-      setExpenseArticleById(m);
-      const tr: Record<number, string> = {};
-      for (const x of takenReasons) tr[x.id] = x.name;
-      setTakenReasonById(tr);
-      const ts: Record<number, string> = {};
-      for (const x of takenSources) ts[x.id] = x.name;
-      setTakenSourceById(ts);
-      const dr: Record<number, string> = {};
-      for (const x of debtReasons) dr[x.id] = x.name;
-      setDebtReasonById(dr);
-      setMyDraft(draft);
-    })
+    ])
+      .then(([reps, whs, expenseArts, takenReasons, takenSources, debtReasons, draft]) => {
+        setReports(reps);
+        setWarehouses(whs);
+        const m: Record<number, string> = {};
+        for (const a of expenseArts) m[a.id] = a.name;
+        setExpenseArticleById(m);
+        const tr: Record<number, string> = {};
+        for (const x of takenReasons) tr[x.id] = x.name;
+        tr[TAKE_DEBT_REASON_VIRTUAL_ID] = TAKE_DEBT_REASON_LABEL;
+        setTakenReasonById(tr);
+        const ts: Record<number, string> = {};
+        for (const x of takenSources) ts[x.id] = x.name;
+        setTakenSourceById(ts);
+        const dr: Record<number, string> = {};
+        for (const x of debtReasons) dr[x.id] = x.name;
+        setDebtReasonById(dr);
+        setMyDraft(draft);
+      })
       .catch(() => {
         setReports([]);
         setWarehouses([]);
         setMyDraft(null);
       })
       .finally(() => setListLoading(false));
-  }, [me, successMessage]);
+  }, [me, dateFrom, dateTo, isConsultant]);
+
+  useEffect(() => {
+    void loadReportsData();
+  }, [loadReportsData, successMessage]);
 
   /** Кратко для ячейки таблицы: только число доплат и сумма (ФИО — в попапе). */
   const extraPaymentsSummary = (arr: { amount: number; order_number: string; consultant_last_name?: string | null }[]) => {
@@ -372,14 +524,18 @@ export default function Reports() {
   };
 
   const openVzyalaPopup = (r: ReportItem) => {
-    setVzyalaPopup((r.vzyala_details ?? []) as {
-      order_number?: string;
-      amount?: number;
-      taken_reason_id?: number | null;
-      order_percent?: number | null;
-      report_month?: string | null;
-      warehouse_id?: number | null;
-    }[]);
+    const initial = (r.vzyala_details ?? []) as VzyalaDetailPopupRow[];
+    setVzyalaPopup({ rows: initial, columns: computeVzyalaColumnFlags(initial) });
+    void api.reports.get(r.id).then((full) => {
+      const next = (full.vzyala_details ?? []) as VzyalaDetailPopupRow[];
+      setVzyalaPopup((prev) => {
+        if (!prev) return null;
+        if (vzyalaPopupRowsEqual(prev.rows, next)) return { ...prev, columns: computeVzyalaColumnFlags(next) };
+        return { rows: next, columns: computeVzyalaColumnFlags(next) };
+      });
+    }).catch(() => {
+      /* остаёмся на данных из строки таблицы */
+    });
   };
 
   const openDolgPopup = (r: ReportItem) => {
@@ -392,6 +548,8 @@ export default function Reports() {
       warehouse_id?: number | null;
     }[]);
   };
+
+  const [utroShouldOverrides, setUtroShouldOverrides] = useState<Record<number, number | null>>({});
 
   const openReportFiles = (title: string, urls: string[]) => {
     const clean = (urls ?? []).filter(Boolean);
@@ -425,11 +583,75 @@ export default function Reports() {
       for (let i = 0; i < arr.length; i++) {
         const cur = arr[i];
         const prev = i > 0 ? arr[i - 1] : null;
-        map.set(cur.id, prev != null ? (prev.ost_fact ?? prev.ost ?? null) : null);
+        const base = prev != null ? (prev.ost_fact ?? prev.ost ?? null) : null;
+        const override = utroShouldOverrides[cur.id];
+        map.set(cur.id, override !== undefined ? override : base);
       }
     }
     return map;
-  }, [reports]);
+  }, [reports, utroShouldOverrides]);
+
+  useEffect(() => {
+    // Если в таблице показываем "первый" отчёт по точке в текущем списке,
+    // то его "На утро" нужно брать из последнего отчёта ДО него (даже если он вне диапазона дат).
+    let cancelled = false;
+    const byWarehouse = new Map<number, ReportItem[]>();
+    for (const r of reports) {
+      if (r.warehouse_id == null || r.id == null) continue;
+      const arr = byWarehouse.get(r.warehouse_id) ?? [];
+      arr.push(r);
+      byWarehouse.set(r.warehouse_id, arr);
+    }
+    const firstReports: { reportId: number; warehouseId: number }[] = [];
+    for (const [warehouseId, arr] of byWarehouse) {
+      arr.sort((a, b) => {
+        const ta = reportSubmittedOrCreatedAt(a);
+        const tb = reportSubmittedOrCreatedAt(b);
+        const tna = ta ? new Date(ta).getTime() : 0;
+        const tnb = tb ? new Date(tb).getTime() : 0;
+        if (tna !== tnb) return tna - tnb;
+        return (a.id ?? 0) - (b.id ?? 0);
+      });
+      const first = arr[0];
+      if (!first?.id) continue;
+      // если уже есть override — не трогаем
+      if (utroShouldOverrides[first.id] !== undefined) continue;
+      firstReports.push({ reportId: first.id, warehouseId });
+    }
+    if (firstReports.length === 0) return;
+
+    (async () => {
+      const updates: Record<number, number | null> = {};
+      for (const it of firstReports) {
+        try {
+          const res = await api.reports.getWarehouseLastOst(it.warehouseId, { beforeReportId: it.reportId });
+          updates[it.reportId] = res.ost ?? null;
+        } catch {
+          // ignore
+        }
+      }
+      if (cancelled) return;
+      const keys = Object.keys(updates);
+      if (keys.length === 0) return;
+      setUtroShouldOverrides((prev) => {
+        const next = { ...prev };
+        let changed = false;
+        for (const k of keys) {
+          const id = Number(k);
+          if (!Number.isFinite(id)) continue;
+          if (next[id] === undefined) {
+            next[id] = updates[id] ?? null;
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [reports, utroShouldOverrides]);
 
   type DisplayRow = { dateStr: string; dateLabel: string; warehouseId: number; warehouseName: string; report: ReportItem | null };
   const hasNoWarehouseReports = useMemo(
@@ -444,30 +666,36 @@ export default function Reports() {
     return list;
   };
 
+  const warehousesInReportsList = useMemo(() => warehousesVisibleInReports(warehouses), [warehouses]);
+
   const displayWarehouses = useMemo((): { id: number; name: string }[] => {
     if (canSeeAllPoints) {
       return appendNoWarehouseRow(
-        [...warehouses].sort((a, b) => a.name.localeCompare(b.name)).map((w) => ({ id: w.id, name: w.name }))
+        [...warehousesInReportsList]
+          .sort((a, b) => a.name.localeCompare(b.name))
+          .map((w) => ({ id: w.id, name: w.name }))
       );
     }
     const whIds = new Set(reports.map((r) => r.warehouse_id).filter((id): id is number => id != null));
     return appendNoWarehouseRow(
-      [...warehouses]
+      [...warehousesInReportsList]
         .filter((w) => whIds.has(w.id))
         .sort((a, b) => a.name.localeCompare(b.name))
         .map((w) => ({ id: w.id, name: w.name }))
     );
-  }, [warehouses, reports, canSeeAllPoints, hasNoWarehouseReports]);
+  }, [warehousesInReportsList, reports, canSeeAllPoints, hasNoWarehouseReports]);
 
   /** Сетка точек: в режиме «только пропуски» админ/менеджер видят все склады, чтобы видеть дыры по каждой точке. */
   const gridWarehouses = useMemo((): { id: number; name: string }[] => {
     if (hideSubmitted && canSeeAllReports) {
       return appendNoWarehouseRow(
-        [...warehouses].sort((a, b) => a.name.localeCompare(b.name)).map((w) => ({ id: w.id, name: w.name }))
+        [...warehousesInReportsList]
+          .sort((a, b) => a.name.localeCompare(b.name))
+          .map((w) => ({ id: w.id, name: w.name }))
       );
     }
     return displayWarehouses;
-  }, [hideSubmitted, canSeeAllReports, warehouses, displayWarehouses, hasNoWarehouseReports]);
+  }, [hideSubmitted, canSeeAllReports, warehousesInReportsList, displayWarehouses, hasNoWarehouseReports]);
 
   const allDisplayRows = useMemo(() => {
     const reportByDateWarehouse = new Map<string, ReportItem[]>();
@@ -567,6 +795,7 @@ export default function Reports() {
       revenue: fmt(sum((r) => r.revenue)),
       nal: fmt(sum((r) => r.nal)),
       ost: fmt(sum((r) => r.ost)),
+      ost_fact: fmt(sum((r) => r.ost_fact ?? null)),
       return_bn: fmt(sum((r) => r.return_bn)),
       return_nal: fmt(sum((r) => r.return_nal)),
       bn_card_reconciliation: fmt(sum((r) => r.bn_card_reconciliation)),
@@ -638,20 +867,30 @@ export default function Reports() {
     });
   };
 
+  const hideReportColumn = (key: string) => {
+    setReportColumnOrder((prev) => {
+      if (prev.length <= 1) return prev;
+      return prev.filter((k) => k !== key);
+    });
+  };
+
+  const showReportColumn = (key: string) => {
+    setReportColumnOrder((prev) => (prev.includes(key) ? prev : [...prev, key]));
+  };
+
+  const reportColumnsSavePayload = () => ({
+    columns: reportColumnOrder,
+    labels: reportColumnLabelsToOverrides(reportColumnLabels),
+  });
+
   const handleSaveReportColumnsMine = async () => {
     setColumnsMessage("");
     setColumnsSaveMineLoading(true);
     try {
-      await api.updateReportsTableColumnsMine(reportColumnOrder);
+      await api.updateReportsTableColumnsMine(reportColumnsSavePayload());
       const res = await api.getReportsTableColumns();
-      const inc = me?.is_admin === true;
-      const def = normalizeReportTableColumnOrder(res.default_columns, { includeActions: !!inc });
-      const mine =
-        res.mine_columns != null
-          ? normalizeReportTableColumnOrder(res.mine_columns, { includeActions: !!inc })
-          : null;
-      setReportColumnOrder(mine ?? def);
-      setColumnsMessage("Порядок столбцов сохранён для вашего аккаунта.");
+      applyReportColumnsSettings(res, me?.is_admin === true);
+      setColumnsMessage("Настройки столбцов сохранены для вашего аккаунта.");
       setTimeout(() => setColumnsMessage(""), 4000);
     } catch (err) {
       setColumnsMessage(err instanceof Error ? err.message : "Не удалось сохранить");
@@ -665,15 +904,10 @@ export default function Reports() {
     setColumnsMessage("");
     setColumnsSaveDefaultLoading(true);
     try {
-      await api.updateReportsTableColumnsDefault(reportColumnOrder);
+      await api.updateReportsTableColumnsDefault(reportColumnsSavePayload());
       const res = await api.getReportsTableColumns();
-      const def = normalizeReportTableColumnOrder(res.default_columns, { includeActions: true });
-      const mine =
-        res.mine_columns != null
-          ? normalizeReportTableColumnOrder(res.mine_columns, { includeActions: true })
-          : null;
-      setReportColumnOrder(mine ?? def);
-      setColumnsMessage("Порядок столбцов сохранён для всех пользователей.");
+      applyReportColumnsSettings(res, true);
+      setColumnsMessage("Настройки столбцов сохранены для всех пользователей.");
       setTimeout(() => setColumnsMessage(""), 4000);
     } catch (err) {
       setColumnsMessage(err instanceof Error ? err.message : "Не удалось сохранить");
@@ -688,10 +922,8 @@ export default function Reports() {
     try {
       await api.clearReportsTableColumnsMine();
       const res = await api.getReportsTableColumns();
-      const inc = me?.is_admin === true;
-      const def = normalizeReportTableColumnOrder(res.default_columns, { includeActions: !!inc });
-      setReportColumnOrder(def);
-      setColumnsMessage("Используется общий порядок столбцов.");
+      applyReportColumnsSettings(res, me?.is_admin === true);
+      setColumnsMessage("Используются общие настройки столбцов.");
       setTimeout(() => setColumnsMessage(""), 4000);
     } catch (err) {
       setColumnsMessage(err instanceof Error ? err.message : "Не удалось сбросить");
@@ -705,10 +937,11 @@ export default function Reports() {
     r: ReportItem | null;
     utroShould: number | null;
     utroMismatch: boolean;
+    ostMismatch: boolean;
   };
 
   const renderReportsBodyCell = (colKey: string, ctx: BodyCtx) => {
-    const { row, r, utroShould, utroMismatch } = ctx;
+    const { row, r, utroShould, utroMismatch, ostMismatch } = ctx;
     switch (colKey) {
       case "created_at":
         return (
@@ -744,6 +977,21 @@ export default function Reports() {
             {row.warehouseName}
           </td>
         );
+      case "comment": {
+        const txt = (r?.comment ?? "").trim();
+        return (
+          <td
+            key={colKey}
+            className="px-3 py-2.5 text-xs min-w-[220px] max-w-[360px] align-top"
+            style={{ color: txt ? "var(--text-primary)" : "var(--text-tertiary)" }}
+            title={txt || undefined}
+          >
+            <div className="line-clamp-3 whitespace-pre-wrap break-words">
+              {txt || "—"}
+            </div>
+          </td>
+        );
+      }
       case "utro_should":
         return (
           <td key={colKey} className="px-3 py-2.5 whitespace-nowrap tabular-nums" style={{ color: "var(--text-secondary)" }}>
@@ -778,8 +1026,30 @@ export default function Reports() {
         );
       case "ost":
         return (
-          <td key={colKey} className="px-3 py-2.5 whitespace-nowrap tabular-nums" style={{ color: "var(--text-secondary)" }}>
+          <td
+            key={colKey}
+            className="px-3 py-2.5 whitespace-nowrap tabular-nums"
+            style={{
+              color: ostMismatch ? "var(--error)" : "var(--text-secondary)",
+              background: ostMismatch ? "var(--error-light)" : "transparent",
+            }}
+            title={ostMismatch ? "Фактический остаток отличается от расчётного" : undefined}
+          >
             {fmtNum(r?.ost ?? null)}
+          </td>
+        );
+      case "ost_fact":
+        return (
+          <td
+            key={colKey}
+            className="px-3 py-2.5 whitespace-nowrap tabular-nums"
+            style={{
+              color: ostMismatch ? "var(--error)" : "var(--text-secondary)",
+              background: ostMismatch ? "var(--error-light)" : "transparent",
+            }}
+            title={ostMismatch ? "Фактический остаток отличается от расчётного" : undefined}
+          >
+            {fmtNum(r?.ost_fact ?? null)}
           </td>
         );
       case "has_returns":
@@ -975,6 +1245,7 @@ export default function Reports() {
               <div className="flex items-center gap-3 flex-wrap">
                 <Link
                   to={`/reports/${r.id}/edit`}
+                  state={{ backgroundLocation: location }}
                   className="text-sm font-medium hover:underline"
                   style={{ color: "var(--accent)" }}
                 >
@@ -1014,6 +1285,12 @@ export default function Reports() {
             —
           </td>
         );
+      case "comment":
+        return (
+          <td key={colKey} className="px-3 py-2.5 whitespace-nowrap" style={{ color: "var(--text-secondary)" }}>
+            —
+          </td>
+        );
       case "utro":
         return (
           <td key={colKey} className="px-3 py-2.5 whitespace-nowrap tabular-nums" style={{ color: "var(--text-primary)" }}>
@@ -1036,6 +1313,12 @@ export default function Reports() {
         return (
           <td key={colKey} className="px-3 py-2.5 whitespace-nowrap tabular-nums" style={{ color: "var(--text-primary)" }}>
             {totals.ost}
+          </td>
+        );
+      case "ost_fact":
+        return (
+          <td key={colKey} className="px-3 py-2.5 whitespace-nowrap tabular-nums" style={{ color: "var(--text-primary)" }}>
+            {totals.ost_fact}
           </td>
         );
       case "has_returns":
@@ -1145,6 +1428,8 @@ export default function Reports() {
         return r?.user_username ?? "—";
       case "warehouse_name":
         return row.warehouseName;
+      case "comment":
+        return (r?.comment ?? "").trim() || "—";
       case "utro_should":
         return fmtNum(utroShould);
       case "utro":
@@ -1155,6 +1440,8 @@ export default function Reports() {
         return fmtNum(r?.nal ?? null);
       case "ost":
         return fmtNum(r?.ost ?? null);
+      case "ost_fact":
+        return fmtNum(r?.ost_fact ?? null);
       case "has_returns":
         return returnsSummary(r ?? null);
       case "has_expenses":
@@ -1202,6 +1489,8 @@ export default function Reports() {
         return totals.nal;
       case "ost":
         return totals.ost;
+      case "ost_fact":
+        return totals.ost_fact;
       case "has_returns":
         return "—";
       case "has_expenses":
@@ -1230,6 +1519,7 @@ export default function Reports() {
         return totals.extra_payments;
       case "z_report":
       case "card":
+      case "comment":
       case "created_at":
       case "user_username":
       case "warehouse_name":
@@ -1246,14 +1536,19 @@ export default function Reports() {
     try {
       const XLSX = await import("xlsx");
       const cols = reportColumnOrder.filter((k) => k !== "actions");
-      const header = cols.map((k) => REPORT_TABLE_COLUMN_LABELS[k] ?? k);
+      const header = cols.map((k) => resolveReportColumnLabel(k, reportColumnLabels));
       const data: string[][] = [header];
       for (const row of filteredReports) {
         const r = row.report;
         const utroShould = r ? utroShouldByReportId.get(r.id) ?? null : null;
         const utroMismatch =
           r != null && utroShould != null && r.utro != null && Math.abs(utroShould - r.utro) > 0.0001;
-        const ctx: BodyCtx = { row, r, utroShould, utroMismatch };
+        const ostMismatch =
+          r != null &&
+          r.ost_fact != null &&
+          r.ost != null &&
+          Math.abs(r.ost_fact - r.ost) > 0.0001;
+        const ctx: BodyCtx = { row, r, utroShould, utroMismatch, ostMismatch };
         data.push(cols.map((colKey) => getReportsExportCellValue(colKey, ctx)));
       }
       data.push(cols.map((colKey, i) => (i === 0 ? "Итого" : getReportsExportTotalValue(colKey))));
@@ -1306,7 +1601,7 @@ export default function Reports() {
           </Link>
           {!isReportsAdminToolbar && (
             <Link
-              to="/reports/my-debts-stats"
+              to="/reports/debts-summary"
               className="inline-flex items-center gap-2 px-5 py-3 rounded-xl text-sm font-semibold border transition-colors"
               style={{ borderColor: "var(--border)", background: "var(--bg-secondary)", color: "var(--text-primary)" }}
             >
@@ -1329,21 +1624,65 @@ export default function Reports() {
       {me !== null && (
         <div className="mt-8 rounded-2xl overflow-hidden border shadow-sm" style={{ borderColor: "var(--border)", background: "var(--bg-primary)" }}>
           <div className="px-5 py-4 border-b" style={{ borderColor: "var(--border)" }}>
-            <h2 className="text-xl font-bold" style={{ color: "var(--text-primary)" }}>Отчёты</h2>
-            <p className="text-sm mt-0.5" style={{ color: "var(--text-secondary)" }}>
-              {isReportsAdminToolbar ? (
-                hideSubmitted
-                  ? `Только без отчёта: ${filteredReports.length} строк (дата × точка).`
-                  : `Показано: ${filteredReports.length} строк (склады × даты).`
-              ) : (
-                `Показано: ${filteredReports.length} строк.`
-              )}
-            </p>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h2 className="text-xl font-bold" style={{ color: "var(--text-primary)" }}>Отчёты</h2>
+                <p className="text-sm mt-0.5" style={{ color: "var(--text-secondary)" }}>
+                  {isReportsAdminToolbar ? (
+                    hideSubmitted
+                      ? `Только без отчёта: ${filteredReports.length} строк (дата × точка).`
+                      : `Показано: ${filteredReports.length} строк (склады × даты).`
+                  ) : (
+                    `Показано: ${filteredReports.length} строк.`
+                  )}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void loadReportsData()}
+                disabled={listLoading || me === null}
+                className="inline-flex items-center gap-2 text-sm font-medium px-3 py-2 rounded-lg border shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                style={{
+                  borderColor: "var(--border)",
+                  color: "var(--text-primary)",
+                  background: "var(--bg-secondary)",
+                }}
+                title="Обновить список отчётов"
+              >
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden
+                  className={listLoading ? "animate-spin" : undefined}
+                >
+                  <polyline points="23 4 23 10 17 10" />
+                  <polyline points="1 20 1 14 7 14" />
+                  <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+                </svg>
+                {listLoading ? "Обновление…" : "Обновить"}
+              </button>
+            </div>
             {/* Панель фильтров */}
             <div className="flex flex-wrap items-center gap-4 mt-4">
               {isReportsAdminToolbar && (
               <div ref={datePickerRef} className="relative">
                 <span className="text-xs font-medium mr-2" style={{ color: "var(--text-secondary)" }}>Дата:</span>
+                <button
+                  type="button"
+                  onClick={() => shiftDateRange(-1)}
+                  className="inline-flex items-center justify-center w-10 h-10 mr-2 rounded-lg text-sm border outline-none focus:ring-2 focus:ring-offset-0 focus:ring-[var(--accent)]"
+                  style={{ background: "var(--bg-secondary)", borderColor: "var(--border)", color: "var(--text-primary)" }}
+                  title="Предыдущий период"
+                  aria-label="Предыдущий период"
+                >
+                  ←
+                </button>
                 <button
                   type="button"
                   onClick={() => setDatePickerOpen((v) => !v)}
@@ -1362,6 +1701,16 @@ export default function Reports() {
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ opacity: 0.6 }}>
                     <polyline points="6 9 12 15 18 9" />
                   </svg>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => shiftDateRange(1)}
+                  className="inline-flex items-center justify-center w-10 h-10 ml-2 rounded-lg text-sm border outline-none focus:ring-2 focus:ring-offset-0 focus:ring-[var(--accent)]"
+                  style={{ background: "var(--bg-secondary)", borderColor: "var(--border)", color: "var(--text-primary)" }}
+                  title="Следующий период"
+                  aria-label="Следующий период"
+                >
+                  →
                 </button>
                 {datePickerOpen && (
                   <div
@@ -1505,63 +1854,7 @@ export default function Reports() {
                   </span>
                 </div>
               )}
-              {isReportsAdminToolbar && (
-                <div className="flex flex-wrap items-center gap-2">
-                  <Link
-                    to={`/reports/expenses${location.search}`}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-colors"
-                    style={{ borderColor: "var(--border)", background: "var(--bg-secondary)", color: "var(--text-primary)" }}
-                  >
-                    Отчёт по расходам
-                  </Link>
-                  <Link
-                    to={`/reports/encashment${location.search}`}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-colors"
-                    style={{ borderColor: "var(--border)", background: "var(--bg-secondary)", color: "var(--text-primary)" }}
-                  >
-                    Отчёт по инкассации
-                  </Link>
-                  <Link
-                    to={`/reports/central-cash${location.search}`}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-colors"
-                    style={{ borderColor: "var(--border)", background: "var(--bg-secondary)", color: "var(--text-primary)" }}
-                  >
-                    Центральная касса
-                  </Link>
-                  <Link
-                    to={`/reports/analytics/point?${new URLSearchParams({
-                      from: dateFrom,
-                      to: dateTo,
-                      ...(warehouseFilterSelected ? { point: warehouseFilterSelected } : {}),
-                    }).toString()}`}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-colors"
-                    style={{ borderColor: "var(--accent)", background: "var(--accent-light)", color: "var(--accent)" }}
-                  >
-                    Аналитика по точке
-                  </Link>
-                  <Link
-                    to={`/reports/analytics/consultant?${new URLSearchParams({ from: dateFrom, to: dateTo }).toString()}`}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-colors"
-                    style={{ borderColor: "var(--accent)", background: "var(--accent-light)", color: "var(--accent)" }}
-                  >
-                    Аналитика по продавцу
-                  </Link>
-                  <Link
-                    to="/reports/debts-summary"
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-colors"
-                    style={{ borderColor: "var(--accent)", background: "var(--accent-light)", color: "var(--accent)" }}
-                  >
-                    Долги и «Взято»
-                  </Link>
-                  <Link
-                    to="/reports/withholding"
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-colors"
-                    style={{ borderColor: "var(--accent)", background: "var(--accent-light)", color: "var(--accent)" }}
-                  >
-                    Удержание
-                  </Link>
-                </div>
-              )}
+              {isReportsAdminToolbar && <ReportsSubnav />}
             </div>
             {columnsMessage && (
               <div
@@ -1648,8 +1941,30 @@ export default function Reports() {
               )}
               {columnsCustomizeMode && (
                 <span className="text-xs max-w-xl" style={{ color: "var(--text-tertiary)" }}>
-                  Перетаскивайте заголовки столбцов. «Сохранить для себя» — только у вас; «Сохранить для всех» — порядок по умолчанию (доступно администратору).
+                  Перетаскивайте заголовки для порядка, измените названия в полях заголовков, × — скрыть столбец. «Сохранить для себя» — только у вас; «Сохранить для всех» — по умолчанию (администратор).
                 </span>
+              )}
+              {columnsCustomizeMode && hiddenReportColumns.length > 0 && (
+                <div className="flex flex-wrap items-center gap-2 w-full basis-full">
+                  <span className="text-xs shrink-0" style={{ color: "var(--text-tertiary)" }}>
+                    Скрытые столбцы:
+                  </span>
+                  {hiddenReportColumns.map((key) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => showReportColumn(key)}
+                      className="text-xs font-medium px-2 py-1 rounded-md border"
+                      style={{
+                        borderColor: "var(--border)",
+                        color: "var(--text-secondary)",
+                        background: "var(--bg-secondary)",
+                      }}
+                    >
+                      + {resolveReportColumnLabel(key, reportColumnLabels)}
+                    </button>
+                  ))}
+                </div>
               )}
             </div>
           </div>
@@ -1662,8 +1977,10 @@ export default function Reports() {
                 : "Нет отчётов"}
             </div>
           ) : reportColumnOrder.length === 0 ? (
-            <div className="flex items-center justify-center py-16 text-sm" style={{ color: "var(--text-secondary)" }}>
-              Загрузка таблицы…
+            <div className="flex items-center justify-center py-16 text-sm text-center px-4" style={{ color: "var(--text-secondary)" }}>
+              {columnsCustomizeMode
+                ? "Все столбцы скрыты. Нажмите «+ …» выше, чтобы показать нужные столбцы."
+                : "Загрузка таблицы…"}
             </div>
           ) : (
             <div className="overflow-x-auto max-h-[70vh] overflow-y-auto">
@@ -1688,10 +2005,44 @@ export default function Reports() {
                         }}
                       >
                         <div
-                          className="font-semibold text-xs uppercase tracking-wider"
+                          className="font-semibold text-xs uppercase tracking-wider flex items-center gap-1.5 min-w-[4.5rem]"
                           style={{ color: "var(--text-secondary)" }}
                         >
-                          {REPORT_TABLE_COLUMN_LABELS[key] ?? key}
+                          {columnsCustomizeMode ? (
+                            <input
+                              type="text"
+                              value={resolveReportColumnLabel(key, reportColumnLabels)}
+                              onChange={(e) =>
+                                setReportColumnLabels((prev) => ({ ...prev, [key]: e.target.value }))
+                              }
+                              onClick={(e) => e.stopPropagation()}
+                              onMouseDown={(e) => e.stopPropagation()}
+                              draggable={false}
+                              className="min-w-[5rem] max-w-[12rem] flex-1 px-1.5 py-0.5 rounded border text-xs font-semibold uppercase tracking-wider"
+                              style={{
+                                borderColor: "var(--border)",
+                                background: "var(--bg-primary)",
+                                color: "var(--text-primary)",
+                              }}
+                              title="Название столбца"
+                            />
+                          ) : (
+                            <span>{resolveReportColumnLabel(key, reportColumnLabels)}</span>
+                          )}
+                          {columnsCustomizeMode && reportColumnOrder.length > 1 && (
+                            <button
+                              type="button"
+                              title="Скрыть столбец"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                hideReportColumn(key);
+                              }}
+                              className="w-5 h-5 rounded flex items-center justify-center text-base leading-none shrink-0"
+                              style={{ color: "var(--text-tertiary)" }}
+                            >
+                              ×
+                            </button>
+                          )}
                         </div>
                       </th>
                     ))}
@@ -1706,6 +2057,11 @@ export default function Reports() {
                       utroShould != null &&
                       r.utro != null &&
                       Math.abs(utroShould - r.utro) > 0.0001;
+                    const ostMismatch =
+                      r != null &&
+                      r.ost_fact != null &&
+                      r.ost != null &&
+                      Math.abs(r.ost_fact - r.ost) > 0.0001;
                     const rowKey =
                       r != null
                         ? `r-${r.id}`
@@ -1721,7 +2077,7 @@ export default function Reports() {
                         }}
                       >
                         {reportColumnOrder.map((colKey) =>
-                          renderReportsBodyCell(colKey, { row, r, utroShould, utroMismatch })
+                          renderReportsBodyCell(colKey, { row, r, utroShould, utroMismatch, ostMismatch })
                         )}
                       </tr>
                     );
@@ -1847,16 +2203,15 @@ export default function Reports() {
             </div>
             <div className="px-3 pt-2 pb-0 overflow-auto flex-1 min-h-0">
               {(() => {
-                const showOrder = vzyalaPopup.some((p) => (p.order_number ?? "").trim() !== "");
-                const showOrderPercent = vzyalaPopup.some((p) => p.order_percent != null);
-                const showDate = vzyalaPopup.some((p) => (p.report_month ?? "").trim() !== "");
-                const showPoint = vzyalaPopup.some((p) => p.warehouse_id != null);
+                const { rows, columns } = vzyalaPopup;
+                const { showOrder, showOrderPercent, showDate, showPoint, showDebtDate } = columns;
                 return (
               <table className="w-full text-xs border-collapse min-w-[520px]">
                 <thead>
                   <tr style={{ borderBottom: "1px solid var(--border)", color: "var(--text-secondary)" }}>
                     <th className="text-left py-1.5 pr-2 whitespace-nowrap">За что взято</th>
                     <th className="text-left py-1.5 pr-2 whitespace-nowrap">Откуда взято</th>
+                    {showDebtDate && <th className="text-left py-1.5 pr-2 whitespace-nowrap">Дата долга</th>}
                     {showOrder && <th className="text-left py-1.5 pr-2 whitespace-nowrap">Заказ</th>}
                     <th className="text-left py-1.5 pr-2 whitespace-nowrap">Сумма</th>
                     {showOrderPercent && <th className="text-left py-1.5 pr-2 whitespace-nowrap">% от заказа</th>}
@@ -1865,15 +2220,18 @@ export default function Reports() {
                   </tr>
                 </thead>
                 <tbody>
-                  {vzyalaPopup.map((p, i) => (
+                  {rows.map((p, i) => (
                     <tr key={i} style={{ borderBottom: "1px solid var(--border)", color: "var(--text-primary)" }}>
-                      <td className="py-1.5 pr-2">{(p.taken_reason_id != null ? takenReasonById[p.taken_reason_id] : "") || "—"}</td>
-                      <td className="py-1.5 pr-2">{(p.taken_source_id != null ? takenSourceById[p.taken_source_id] : "") || "—"}</td>
+                      <td className="py-1.5 pr-2">{vzyalaReasonLabel(p, takenReasonById)}</td>
+                      <td className="py-1.5 pr-2">{vzyalaSourceLabel(p, takenSourceById)}</td>
+                      {showDebtDate && (
+                        <td className="py-1.5 pr-2">{(p.linked_debt_date ?? "").trim() || "—"}</td>
+                      )}
                       {showOrder && <td className="py-1.5 pr-2">{(p.order_number ?? "").trim() || "—"}</td>}
                       <td className="py-1.5 pr-2 tabular-nums">{p.amount ?? "—"}</td>
                       {showOrderPercent && <td className="py-1.5 pr-2 tabular-nums">{p.order_percent ?? "—"}</td>}
                       {showDate && <td className="py-1.5 pr-2">{formatReportPeriodDisplay(p.report_month)}</td>}
-                      {showPoint && <td className="py-1.5 pr-2">{(p.warehouse_id != null ? warehouses.find((w) => w.id === p.warehouse_id)?.name : "") || "—"}</td>}
+                      {showPoint && <td className="py-1.5 pr-2">{vzyalaPointLabel(p, warehouses)}</td>}
                     </tr>
                   ))}
                 </tbody>
@@ -1883,7 +2241,7 @@ export default function Reports() {
             </div>
             <div className="px-3 py-2 flex justify-between text-sm font-semibold shrink-0 border-t" style={{ borderColor: "var(--border)", color: "var(--text-primary)" }}>
               <span>Итого:</span>
-              <span className="tabular-nums">{vzyalaPopup.reduce((s, p) => s + (Number(p.amount) || 0), 0).toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+              <span className="tabular-nums">{vzyalaPopup.rows.reduce((s, p) => s + (Number(p.amount) || 0), 0).toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
             </div>
           </div>
         </div>

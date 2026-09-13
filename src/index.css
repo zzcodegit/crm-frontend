@@ -191,12 +191,79 @@ html.app-apk .chat-widget-panel {
   padding-bottom: env(safe-area-inset-bottom, 0px) !important;
 }
 
+/* Планшет: почти на весь экран (виджет чата) */
+@media (min-width: 641px) and (max-width: 1023px) {
+  .chat-widget-panel:not(.chat-widget-panel--fullscreen) {
+    left: 0 !important;
+    right: 0 !important;
+    width: 100vw !important;
+    max-width: none !important;
+    border-left: none !important;
+    border-top-left-radius: 0 !important;
+    border-bottom-left-radius: 0 !important;
+    padding-top: calc(6px + env(safe-area-inset-top, 0px)) !important;
+    padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)) !important;
+  }
+
+  .group-members-modal {
+    left: 0 !important;
+    right: 0 !important;
+    width: 100vw !important;
+    max-width: none !important;
+    border-left: none !important;
+  }
+}
+
 /* Desktop: expanded chat takes half viewport width */
 @media (min-width: 1024px) {
-  .chat-widget-panel {
+  .chat-widget-panel:not(.chat-widget-panel--fullscreen) {
     width: 50vw !important;
     max-width: 50vw !important;
   }
+}
+
+.chat-messenger-shell:fullscreen {
+  background-color: var(--bg-secondary);
+}
+
+/* /chat на телефоне: без прокрутки всей страницы — только внутренние панели чата */
+.chat-page-outlet {
+  height: 100%;
+  min-height: 0;
+}
+
+@media (max-width: 639px) {
+  .chat-page-main {
+    overflow: hidden !important;
+  }
+
+  .chat-page-outlet {
+    flex: 1 1 0%;
+    min-height: 0;
+    height: auto;
+  }
+
+  .chat-messages-scroll {
+    -webkit-overflow-scrolling: touch !important;
+    touch-action: pan-y !important;
+    overscroll-behavior: contain !important;
+    overflow-anchor: none !important;
+  }
+}
+
+.chat-widget-panel--fullscreen {
+  left: 0 !important;
+  right: 0 !important;
+  top: 0 !important;
+  bottom: 0 !important;
+  width: 100vw !important;
+  max-width: 100vw !important;
+  height: 100dvh !important;
+  border: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 /* Mobile: open chat and member panel as full-screen */
@@ -217,7 +284,7 @@ html.app-apk .chat-widget-panel {
     overscroll-behavior: contain !important;
   }
 
-  .chat-widget-panel {
+  .chat-widget-panel:not(.chat-widget-panel--fullscreen) {
     left: 0 !important;
     right: 0 !important;
     width: 100vw !important;
@@ -238,6 +305,14 @@ html.app-apk .chat-widget-panel {
     padding-top: calc(4px + env(safe-area-inset-top, 0px)) !important;
     padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)) !important;
   }
+
+  .chat-info-panel {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+}
+
+.chat-info-panel {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 /* iOS Safari fix: keep date input inside container width */
@@ -378,4 +453,69 @@ html.app-apk main.flex-1.overflow-auto > .relative.z-10 {
   padding-left: 0.75rem;
   border-left: 3px solid var(--accent);
   color: var(--text-secondary);
+}
+
+/* График работ: перенос длинных имён и точек на мобильных */
+@media (max-width: 767px) {
+  .work-schedule-board .work-schedule-table th,
+  .work-schedule-board .work-schedule-table td {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    hyphens: auto;
+    white-space: normal !important;
+  }
+
+  .work-schedule-board .work-schedule-point-cell {
+    max-width: min(38vw, 10rem);
+    white-space: normal !important;
+    overflow: visible;
+    text-overflow: unset;
+  }
+
+  .work-schedule-board .work-schedule-consultant-chip {
+    display: block;
+    max-width: 100%;
+    box-sizing: border-box;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    white-space: normal;
+  }
+
+  .work-schedule-board .work-schedule-week-card-value {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    white-space: normal;
+  }
+}
+
+/* Редактор статей обучения (TipTap) */
+.training-article-editor .ProseMirror {
+  position: relative;
+  z-index: 0;
+}
+
+.training-article-editor .ProseMirror img.training-editor-img,
+.training-article-editor .ProseMirror img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 0.75rem 0;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.training-article-editor .ProseMirror span[style*="font-size"] {
+  line-height: 1.35;
+}
+
+.prose span[style*="font-size"] {
+  line-height: 1.35;
+}
+
+/* Просмотр фото в чате: блокируем системный pinch-zoom Safari */
+html.crm-chat-image-lightbox-open,
+html.crm-chat-image-lightbox-open body {
+  overflow: hidden !important;
+  overscroll-behavior: none !important;
+  touch-action: none !important;
 }

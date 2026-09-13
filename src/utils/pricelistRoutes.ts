@@ -27,3 +27,18 @@ export function isPricelistSectionPath(pathname: string): boolean {
     pathname.startsWith("/pricelist-mkl/")
   );
 }
+
+/** Страница массового редактирования цен по группе. */
+export function pricelistPricesPath(basePath: PricelistBasePath, group?: string): string {
+  const g = (group ?? "").trim();
+  if (!g) return `${basePath}/prices`;
+  return `${basePath}/prices?group=${encodeURIComponent(g)}`;
+}
+
+export function isPricelistPricesPath(pathname: string): boolean {
+  return (
+    pathname === "/pricelist/prices" ||
+    pathname === "/pricelist-rx/prices" ||
+    pathname === "/pricelist-mkl/prices"
+  );
+}

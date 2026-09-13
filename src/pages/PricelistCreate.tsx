@@ -5,11 +5,29 @@ import { pricelistBasePathFromPathname } from "../utils/pricelistRoutes";
 import PricelistRxDescriptionEditor from "../components/PricelistRxDescriptionEditor";
 import { parsePriceFromText, priceFromFromText, formatPriceInputValue } from "../utils/pricelistPrice";
 import type { ManufacturerItem, FeatureItem, CustomFieldItem } from "../api";
+import {
+  MKL_LENS_UI_KEY,
+  PRICELIST_LENS_UI_KEY,
+  createDefaultMklLensUiFormState,
+  DEFAULT_MKL_LENS_LABELS,
+  DEFAULT_PRICELIST_LENS_LABELS,
+  effectiveMklLensLabel,
+  effectivePricelistLensLabel,
+  mklLensUiFromCustomValues,
+  pricelistLensUiFromCustomValues,
+  serializeMklLensUiToCustomValue,
+  serializePricelistLensUiToCustomValue,
+  type MklLensColumnKey,
+  type MklLensUiFormState,
+} from "../utils/mklLensParamsUi";
 
 function strToRows(s: string | null | undefined): string[] {
-  if (!s || !s.trim()) return [""];
-  const parts = s.split(/,\s*/).map((x) => x.trim()).filter(Boolean);
-  return parts.length ? parts : [""];
+  if (s == null) return [""];
+  const raw = String(s);
+  if (!raw.trim()) return [""];
+  // Не отбрасываем пустые сегменты — иначе при «a, , b» строки таблицы съезжают относительно других колонок.
+  const parts = raw.trim().split(/,\s*/).map((x) => x.trim());
+  return parts.length > 0 ? parts : [""];
 }
 
 type LensParamRow = {
@@ -78,11 +96,17 @@ function LensParamsEditor({
   onChange,
   inputStyle,
   isMkl = false,
+  mklColumnLabels,
+  pricelistFourColumnLabels,
 }: {
   rows: LensParamRow[];
   onChange: (rows: LensParamRow[]) => void;
   inputStyle: React.CSSProperties;
   isMkl?: boolean;
+  /** Подписи столбцов в режиме МКЛ (уже с подстановкой значений по умолчанию). */
+  mklColumnLabels?: Record<MklLensColumnKey, string>;
+  /** Склад / RX: подписи четырёх колонок (с дефолтами). */
+  pricelistFourColumnLabels?: Record<"sph" | "cyl" | "step" | "diameters", string>;
 }) {
   const [pasteStatus, setPasteStatus] = useState<string>("");
   const setField = (index: number, field: keyof LensParamRow, value: string) => {
@@ -104,6 +128,17 @@ function LensParamsEditor({
   const canRemove = true;
 
   const fieldClass = "flex-1 min-w-[7rem] px-3 py-2 rounded-xl text-sm outline-none";
+  const lab = (k: MklLensColumnKey, fallback: string) => {
+    if (isMkl && mklColumnLabels?.[k]) return mklColumnLabels[k];
+    if (
+      !isMkl &&
+      pricelistFourColumnLabels &&
+      (k === "sph" || k === "cyl" || k === "step" || k === "diameters")
+    ) {
+      return pricelistFourColumnLabels[k];
+    }
+    return fallback;
+  };
 
   const handlePasteFromClipboard = async () => {
     try {
@@ -149,12 +184,12 @@ function LensParamsEditor({
                 : "minmax(5rem,1fr) minmax(5rem,1fr) minmax(4.5rem,0.75fr) minmax(5rem,1fr) auto",
             }}
           >
-            <span>SPH</span>
-            <span>CYL</span>
-            <span>Шаг</span>
-            <span>{isMkl ? "Матриал/Влаг" : "Диаметры, мм"}</span>
-            {isMkl ? <span>Режим замены</span> : null}
-            {isMkl ? <span>ВС</span> : null}
+            <span>{lab("sph", "SPH")}</span>
+            <span>{lab("cyl", "CYL")}</span>
+            <span>{lab("step", "Шаг")}</span>
+            <span>{isMkl ? lab("diameters", "Матриал/Влаг") : lab("diameters", "Диаметры, мм")}</span>
+            {isMkl ? <span>{lab("replacement", "Режим замены")}</span> : null}
+            {isMkl ? <span>{lab("baseCurve", "ВС")}</span> : null}
             <span className="w-8 shrink-0" aria-hidden />
           </div>
           {list.map((row, i) => (
@@ -174,7 +209,7 @@ function LensParamsEditor({
                 className={fieldClass}
                 style={inputStyle}
                 placeholder="−6.00 … +4.00 D"
-                aria-label={`SPH, строка ${i + 1}`}
+                aria-label={`${lab("sph", "SPH")}, строка ${i + 1}`}
               />
               <input
                 type="text"
@@ -183,7 +218,7 @@ function LensParamsEditor({
                 className={fieldClass}
                 style={inputStyle}
                 placeholder="−0.25 … −4.00 D"
-                aria-label={`CYL, строка ${i + 1}`}
+                aria-label={`${lab("cyl", "CYL")}, строка ${i + 1}`}
               />
               <input
                 type="text"
@@ -192,7 +227,7 @@ function LensParamsEditor({
                 className={fieldClass}
                 style={inputStyle}
                 placeholder="0.25"
-                aria-label={`Шаг, строка ${i + 1}`}
+                aria-label={`${lab("step", "Шаг")}, строка ${i + 1}`}
               />
               <input
                 type="text"
@@ -201,7 +236,7 @@ function LensParamsEditor({
                 className={fieldClass}
                 style={inputStyle}
                 placeholder={isMkl ? "Например: 38%" : "65 или 65 мм"}
-                aria-label={`${isMkl ? "Матриал/Влаг" : "Диаметры"}, строка ${i + 1}`}
+                aria-label={`${isMkl ? lab("diameters", "Матриал/Влаг") : lab("diameters", "Диаметры")}, строка ${i + 1}`}
               />
               {isMkl ? (
                 <input
@@ -211,7 +246,7 @@ function LensParamsEditor({
                   className={fieldClass}
                   style={inputStyle}
                   placeholder="1 день / 2 недели / 1 месяц"
-                  aria-label={`Режим замены, строка ${i + 1}`}
+                  aria-label={`${lab("replacement", "Режим замены")}, строка ${i + 1}`}
                 />
               ) : null}
               {isMkl ? (
@@ -222,7 +257,7 @@ function LensParamsEditor({
                   className={fieldClass}
                   style={inputStyle}
                   placeholder="8.6"
-                  aria-label={`ВС, строка ${i + 1}`}
+                  aria-label={`${lab("baseCurve", "ВС")}, строка ${i + 1}`}
                 />
               ) : null}
               {canRemove ? (
@@ -248,7 +283,11 @@ function LensParamsEditor({
             Вставить из буфера
           </button>
           <p className="text-xs leading-relaxed" style={{ color: "var(--text-tertiary)" }}>
-            Формат строки: SPH, CYL, Шаг, {isMkl ? "Матриал/Влаг, Режим замены, ВС" : "Диаметры"} (через TAB). Пример: -6.00 до +2.00[TAB]-[TAB]0.25[TAB]{isMkl ? "38%[TAB]1 месяц[TAB]8.6" : "70"}
+            Формат строки: {lab("sph", "SPH")}, {lab("cyl", "CYL")}, {lab("step", "Шаг")}
+            {isMkl
+              ? `, ${lab("diameters", "Матриал/Влаг")}, ${lab("replacement", "Режим замены")}, ${lab("baseCurve", "ВС")}`
+              : `, ${lab("diameters", "Диаметры")}`}{" "}
+            (через TAB). Пример: -6.00 до +2.00[TAB]-[TAB]0.25[TAB]{isMkl ? "38%[TAB]1 месяц[TAB]8.6" : "70"}
           </p>
           {pasteStatus ? (
             <p className="text-xs" style={{ color: "var(--text-secondary)" }}>
@@ -528,6 +567,7 @@ export default function PricelistCreate({ editId }: { editId?: number }) {
   const [lensParamRows, setLensParamRows] = useState<LensParamRow[]>([
     { sph: "", cyl: "", step: "", diameters: "", replacementMode: "", baseCurve: "" },
   ]);
+  const [mklLensUi, setMklLensUi] = useState<MklLensUiFormState>(() => createDefaultMklLensUiFormState());
   const [price, setPrice] = useState<string>("");
   const [priceFromChecked, setPriceFromChecked] = useState(false);
   const [priceToChecked, setPriceToChecked] = useState(false);
@@ -560,6 +600,30 @@ export default function PricelistCreate({ editId }: { editId?: number }) {
     () => [...customFields].sort((a, b) => a.sort_index - b.sort_index || a.id - b.id),
     [customFields]
   );
+
+  const mklEditorColumnLabels = useMemo((): Record<MklLensColumnKey, string> | undefined => {
+    if (catalog !== "mkl") return undefined;
+    return {
+      sph: effectiveMklLensLabel(mklLensUi, "sph"),
+      cyl: effectiveMklLensLabel(mklLensUi, "cyl"),
+      step: effectiveMklLensLabel(mklLensUi, "step"),
+      diameters: effectiveMklLensLabel(mklLensUi, "diameters"),
+      replacement: effectiveMklLensLabel(mklLensUi, "replacement"),
+      baseCurve: effectiveMklLensLabel(mklLensUi, "baseCurve"),
+    };
+  }, [catalog, mklLensUi]);
+
+  const pricelistEditorFourColumnLabels = useMemo(():
+    | Record<"sph" | "cyl" | "step" | "diameters", string>
+    | undefined => {
+    if (catalog !== "warehouse" && catalog !== "rx") return undefined;
+    return {
+      sph: effectivePricelistLensLabel(mklLensUi, "sph"),
+      cyl: effectivePricelistLensLabel(mklLensUi, "cyl"),
+      step: effectivePricelistLensLabel(mklLensUi, "step"),
+      diameters: effectivePricelistLensLabel(mklLensUi, "diameters"),
+    };
+  }, [catalog, mklLensUi]);
 
   /** Особенности, для которых после выбора нужно выбрать цвет */
   const FEATURES_REQUIRING_COLOR = ["Фотохромные линзы (хамелеоны)", "Цвет остаточного рефлекса линзы"];
@@ -670,6 +734,15 @@ export default function PricelistCreate({ editId }: { editId?: number }) {
           setFeatureIds(item.feature_ids ?? []);
           {
             const cv: Record<string, string | string[] | boolean | null> = { ...(item.custom_values ?? {}) };
+            if (catalog === "mkl") {
+              setMklLensUi(mklLensUiFromCustomValues(cv));
+              delete cv[MKL_LENS_UI_KEY];
+            } else if (catalog === "warehouse" || catalog === "rx") {
+              setMklLensUi(pricelistLensUiFromCustomValues(cv));
+              delete cv[PRICELIST_LENS_UI_KEY];
+            } else {
+              setMklLensUi(createDefaultMklLensUiFormState());
+            }
             for (const field of refs.cFieldsActive) {
               if (field.field_type === "multi_select") {
                 cv[field.code] = normalizeMultiSelectBlocks(cv[field.code]);
@@ -936,7 +1009,7 @@ export default function PricelistCreate({ editId }: { editId?: number }) {
         }
       }
     }
-    const joinRows = (rows: string[]) => rows.map((r) => r.trim()).filter(Boolean).join(", ");
+    const joinRows = (rows: string[]) => rows.map((r) => r.trim()).join(", ");
     const mklReplacementModes = joinRows(lensParamRows.map((r) => r.replacementMode));
     const mklBaseCurves = joinRows(lensParamRows.map((r) => r.baseCurve));
     const hasPriceFrom = priceFromChecked || priceToChecked || priceFromFromText(price);
@@ -1069,6 +1142,15 @@ export default function PricelistCreate({ editId }: { editId?: number }) {
           if (!value) return;
           out[field.code] = value;
         });
+        if (catalog === "mkl") {
+          const mklJson = serializeMklLensUiToCustomValue(mklLensUi);
+          if (mklJson != null) out[MKL_LENS_UI_KEY] = mklJson;
+          else if (isEdit) out[MKL_LENS_UI_KEY] = null;
+        } else if (catalog === "warehouse" || catalog === "rx") {
+          const plJson = serializePricelistLensUiToCustomValue(mklLensUi);
+          if (plJson != null) out[PRICELIST_LENS_UI_KEY] = plJson;
+          else if (isEdit) out[PRICELIST_LENS_UI_KEY] = null;
+        }
         if (!isEdit && Object.keys(out).length === 0) return undefined;
         return out;
       })(),
@@ -1364,7 +1446,145 @@ export default function PricelistCreate({ editId }: { editId?: number }) {
             </Section>
 
             <Section title="Параметры линзы">
-              <LensParamsEditor rows={lensParamRows} onChange={setLensParamRows} inputStyle={inputStyle} isMkl={catalog === "mkl"} />
+              <LensParamsEditor
+                rows={lensParamRows}
+                onChange={setLensParamRows}
+                inputStyle={inputStyle}
+                isMkl={catalog === "mkl"}
+                mklColumnLabels={mklEditorColumnLabels}
+                pricelistFourColumnLabels={pricelistEditorFourColumnLabels}
+              />
+              {catalog === "mkl" || catalog === "warehouse" || catalog === "rx" ? (
+                <div
+                  className="mt-4 rounded-2xl p-4 max-w-4xl"
+                  style={{
+                    background: "var(--bg-secondary)",
+                    border: "1px solid var(--border)",
+                  }}
+                >
+                  <div className="text-sm font-semibold mb-1" style={{ color: "var(--text-primary)" }}>
+                    {catalog === "mkl"
+                      ? "Подписи столбцов и отображение (МКЛ)"
+                      : catalog === "rx"
+                        ? "Подписи столбцов и отображение (RX)"
+                        : "Подписи столбцов и отображение (Прайс склад)"}
+                  </div>
+                  <p className="text-xs leading-relaxed mb-3" style={{ color: "var(--text-tertiary)" }}>
+                    {catalog === "mkl" ? (
+                      <>
+                        Поля в базе те же (SPH, CYL, шаг, матриал/влаг, режим замены, ВС); меняются только заголовки в интерфейсе. Галочки задают, что показывать в списке{" "}
+                        <code className="text-[11px]">/pricelist-mkl</code> и на странице товара.
+                      </>
+                    ) : catalog === "rx" ? (
+                      <>
+                        Поля в базе те же (SPH, CYL, шаг, диаметры). Галочки — что показывать в списке{" "}
+                        <code className="text-[11px]">/pricelist-rx</code> и в карточке позиции.
+                      </>
+                    ) : (
+                      <>
+                        Поля в базе те же (SPH, CYL, шаг, диаметры). Галочки — что показывать в списке{" "}
+                        <code className="text-[11px]">/pricelist</code> и в карточке позиции.
+                      </>
+                    )}
+                  </p>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm border-collapse min-w-[32rem]">
+                      <thead>
+                        <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                          <th className="text-left py-2 pr-3 font-medium" style={{ color: "var(--text-secondary)" }}>
+                            Столбец
+                          </th>
+                          <th className="text-left py-2 pr-3 font-medium" style={{ color: "var(--text-secondary)" }}>
+                            Подпись в списке и карточке
+                          </th>
+                          <th className="text-center py-2 px-2 font-medium whitespace-nowrap" style={{ color: "var(--text-secondary)" }}>
+                            В списке
+                          </th>
+                          <th className="text-center py-2 px-2 font-medium whitespace-nowrap" style={{ color: "var(--text-secondary)" }}>
+                            В карточке
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(catalog === "mkl"
+                          ? (
+                              [
+                                ["sph", "SPH (сфера)"] as const,
+                                ["cyl", "CYL (цилиндр)"] as const,
+                                ["step", "Шаг"] as const,
+                                ["diameters", "Матриал / влагосодержание"] as const,
+                                ["replacement", "Режим замены"] as const,
+                                ["baseCurve", "ВС (базовая кривизна)"] as const,
+                              ] as const
+                            )
+                          : (
+                              [
+                                ["sph", "SPH (сфера)"] as const,
+                                ["cyl", "CYL (цилиндр)"] as const,
+                                ["step", "Шаг"] as const,
+                                ["diameters", "Диаметры"] as const,
+                              ] as const
+                            )
+                        ).map(([key, title]) => (
+                          <tr key={key} style={{ borderBottom: "1px solid var(--border)" }}>
+                            <td className="py-2 pr-3 align-middle" style={{ color: "var(--text-primary)" }}>
+                              {title}
+                            </td>
+                            <td className="py-2 pr-3 align-middle">
+                              <input
+                                type="text"
+                                value={mklLensUi.labels[key]}
+                                onChange={(e) =>
+                                  setMklLensUi((prev) => ({
+                                    ...prev,
+                                    labels: { ...prev.labels, [key]: e.target.value },
+                                  }))
+                                }
+                                className="w-full min-w-[8rem] px-2 py-1.5 rounded-lg text-sm outline-none"
+                                style={inputStyle}
+                                placeholder={
+                                  catalog === "mkl"
+                                    ? DEFAULT_MKL_LENS_LABELS[key]
+                                    : DEFAULT_PRICELIST_LENS_LABELS[key as keyof typeof DEFAULT_PRICELIST_LENS_LABELS]
+                                }
+                                aria-label={`Подпись столбца ${title}`}
+                              />
+                            </td>
+                            <td className="py-2 px-2 text-center align-middle">
+                              <input
+                                type="checkbox"
+                                className="rounded border-gray-300"
+                                checked={mklLensUi.showInList[key]}
+                                onChange={(e) =>
+                                  setMklLensUi((prev) => ({
+                                    ...prev,
+                                    showInList: { ...prev.showInList, [key]: e.target.checked },
+                                  }))
+                                }
+                                aria-label={`Показывать ${title} в списке`}
+                              />
+                            </td>
+                            <td className="py-2 px-2 text-center align-middle">
+                              <input
+                                type="checkbox"
+                                className="rounded border-gray-300"
+                                checked={mklLensUi.showInDetail[key]}
+                                onChange={(e) =>
+                                  setMklLensUi((prev) => ({
+                                    ...prev,
+                                    showInDetail: { ...prev.showInDetail, [key]: e.target.checked },
+                                  }))
+                                }
+                                aria-label={`Показывать ${title} в карточке`}
+                              />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ) : null}
             </Section>
 
             <Section title="Цена и классификация">

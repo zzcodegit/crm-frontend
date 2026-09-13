@@ -52,9 +52,17 @@ export default function Settings() {
   const [sidebarVideoError, setSidebarVideoError] = useState<string | null>(null);
   const [sidebarVideoUrl, setSidebarVideoUrl] = useState<string | null>(null);
   const [sidebarVideoGroupIds, setSidebarVideoGroupIds] = useState<number[]>([]);
+  const [gigaChatEnabled, setGigaChatEnabled] = useState(false);
+  const [gigaChatVisibleGroupIds, setGigaChatVisibleGroupIds] = useState<number[]>([]);
+  const [gigaChatSaving, setGigaChatSaving] = useState(false);
+  const [gigaChatError, setGigaChatError] = useState<string | null>(null);
   const [sidebarMenuOrder, setSidebarMenuOrder] = useState<string[]>([...DEFAULT_SIDEBAR_MENU_ORDER]);
   const [sidebarMenuOrderSaving, setSidebarMenuOrderSaving] = useState(false);
   const [sidebarMenuOrderError, setSidebarMenuOrderError] = useState<string | null>(null);
+  const [newUserChatGroupIds, setNewUserChatGroupIds] = useState<number[]>([]);
+  const [newUserChatGroupsCatalog, setNewUserChatGroupsCatalog] = useState<{ id: number; name: string; is_channel?: boolean }[]>([]);
+  const [newUserChatGroupsSaving, setNewUserChatGroupsSaving] = useState(false);
+  const [newUserChatGroupsError, setNewUserChatGroupsError] = useState<string | null>(null);
   const [allGroups, setAllGroups] = useState<{ id: number; name: string }[]>([]);
   const [activeExportType, setActiveExportType] = useState<"all" | "warehouse" | "rx" | "mkl" | null>(null);
   const [browserChatNotifyEnabled, setBrowserChatNotifyEnabled] = useState(false);
@@ -120,14 +128,20 @@ export default function Settings() {
   const loadSidebarVideoSettings = async () => {
     if (!user?.is_admin) return;
     try {
-      const [settings, groups, menuOrderSettings] = await Promise.all([
+      const [settings, groups, menuOrderSettings, chatDefaults, gigaSettings] = await Promise.all([
         api.getSidebarVideoSettings(),
         api.getGroups(),
         api.getSidebarMenuOrderSettings(),
+        api.getNewUserChatGroups(),
+        api.getGigaChatSettings(),
       ]);
       setSidebarVideoUrl(settings.video_url ?? null);
       setSidebarVideoGroupIds(settings.visible_group_ids ?? []);
       setAllGroups(groups);
+      setNewUserChatGroupIds(chatDefaults.dialog_ids ?? []);
+      setNewUserChatGroupsCatalog(chatDefaults.dialogs ?? []);
+      setGigaChatEnabled(Boolean(gigaSettings.enabled));
+      setGigaChatVisibleGroupIds(gigaSettings.visible_group_ids ?? []);
       const saved = Array.isArray(menuOrderSettings.order) ? menuOrderSettings.order : [];
       const uniqueSaved = saved.filter((to, idx) => typeof to === "string" && saved.indexOf(to) === idx);
       const withMissing = [...uniqueSaved, ...DEFAULT_SIDEBAR_MENU_ORDER.filter((to) => !uniqueSaved.includes(to))];
@@ -135,6 +149,22 @@ export default function Settings() {
     } catch (err) {
       setSidebarVideoError(err instanceof Error ? err.message : "Не удалось загрузить настройки видео");
       setSidebarMenuOrderError(err instanceof Error ? err.message : "Не удалось загрузить порядок меню");
+      setNewUserChatGroupsError(err instanceof Error ? err.message : "Не удалось загрузить группы чата для новых пользователей");
+      setGigaChatError(err instanceof Error ? err.message : "Не удалось загрузить настройки GigaChat");
+    }
+  };
+
+  const saveNewUserChatGroups = async () => {
+    setNewUserChatGroupsSaving(true);
+    setNewUserChatGroupsError(null);
+    try {
+      const saved = await api.updateNewUserChatGroups(newUserChatGroupIds);
+      setNewUserChatGroupIds(saved.dialog_ids ?? []);
+      setNewUserChatGroupsCatalog(saved.dialogs ?? newUserChatGroupsCatalog);
+    } catch (err) {
+      setNewUserChatGroupsError(err instanceof Error ? err.message : "Не удалось сохранить настройку");
+    } finally {
+      setNewUserChatGroupsSaving(false);
     }
   };
 
@@ -152,6 +182,24 @@ export default function Settings() {
       setSidebarVideoError(err instanceof Error ? err.message : "Не удалось сохранить настройки видео");
     } finally {
       setSidebarVideoSaving(false);
+    }
+  };
+
+  const saveGigaChatSettings = async () => {
+    if (!user?.is_admin) return;
+    setGigaChatSaving(true);
+    setGigaChatError(null);
+    try {
+      const saved = await api.updateGigaChatSettings({
+        enabled: gigaChatEnabled,
+        visible_group_ids: gigaChatVisibleGroupIds,
+      });
+      setGigaChatEnabled(Boolean(saved.enabled));
+      setGigaChatVisibleGroupIds(saved.visible_group_ids ?? gigaChatVisibleGroupIds);
+    } catch (err) {
+      setGigaChatError(err instanceof Error ? err.message : "Не удалось сохранить настройки GigaChat");
+    } finally {
+      setGigaChatSaving(false);
     }
   };
 
@@ -205,7 +253,14 @@ export default function Settings() {
     setMobileClientsError(null);
     try {
       const rows = await api.listMobileClients();
-      setMobileClients(Array.isArray(rows) ? rows : []);
+      const list = Array.isArray(rows) ? rows : [];
+      setMobileClients(
+        list.map((row) => {
+          const r = row as MobileClientRow & { deviceId?: string };
+          const did = String(r.device_id ?? r.deviceId ?? "").trim();
+          return { ...r, device_id: did };
+        }),
+      );
     } catch (err) {
       setMobileClientsError(err instanceof Error ? err.message : "Не удалось загрузить список устройств");
       setMobileClients([]);
@@ -548,6 +603,150 @@ export default function Settings() {
               style={{ backgroundColor: "var(--bg-primary)", border: "1px solid var(--border)" }}
             >
               <div className="font-medium mb-1" style={{ color: "var(--text-primary)" }}>
+                GigaChat в чате
+              </div>
+              <div className="text-xs mb-3" style={{ color: "var(--text-secondary)" }}>
+                Показывать диалог с нейросетью только выбранным группам. Ключ авторизации хранится на сервере.
+              </div>
+
+              <label className="inline-flex items-center gap-3 text-sm mb-3" style={{ color: "var(--text-primary)" }}>
+                <input
+                  type="checkbox"
+                  checked={gigaChatEnabled}
+                  onChange={(e) => setGigaChatEnabled(e.target.checked)}
+                />
+                Включить GigaChat
+              </label>
+
+              <div className="text-xs font-medium mb-2" style={{ color: "var(--text-secondary)" }}>
+                Видят группы
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2 mb-3 max-h-[min(50vh,420px)] overflow-y-auto" data-allow-scroll>
+                {allGroups.map((g) => {
+                  const checked = gigaChatVisibleGroupIds.includes(g.id);
+                  return (
+                    <label
+                      key={g.id}
+                      className="flex items-center gap-2 px-3 py-2 rounded-md"
+                      style={{ backgroundColor: "var(--bg-secondary)", border: "1px solid var(--border)" }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => {
+                          const on = e.target.checked;
+                          setGigaChatVisibleGroupIds((prev) => (on ? [...prev, g.id] : prev.filter((id) => id !== g.id)));
+                        }}
+                      />
+                      <span className="text-sm min-w-0" style={{ color: "var(--text-primary)" }}>
+                        {g.name}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+
+              <button
+                type="button"
+                className="px-4 py-2 rounded-md text-sm font-medium"
+                style={{
+                  backgroundColor: gigaChatSaving ? "var(--bg-secondary)" : "var(--accent)",
+                  color: gigaChatSaving ? "var(--text-secondary)" : "#fff",
+                  border: `1px solid ${gigaChatSaving ? "var(--border)" : "var(--accent)"}`,
+                }}
+                disabled={gigaChatSaving}
+                onClick={() => void saveGigaChatSettings()}
+              >
+                {gigaChatSaving ? "Сохранение…" : "Сохранить настройки GigaChat"}
+              </button>
+              {gigaChatError && (
+                <div className="text-xs mt-2" style={{ color: "var(--error)" }}>
+                  {gigaChatError}
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+
+        {user?.is_admin && (
+          <section>
+            <div
+              className="rounded-lg p-5"
+              style={{ backgroundColor: "var(--bg-primary)", border: "1px solid var(--border)" }}
+            >
+              <div className="font-medium mb-1" style={{ color: "var(--text-primary)" }}>
+                Группы чата для новых пользователей
+              </div>
+              <div className="text-xs mb-3 leading-relaxed" style={{ color: "var(--text-secondary)" }}>
+                Когда в CRM создаётся пользователь или его приглашают по ФИО, он автоматически добавляется в отмеченные
+                группы и каналы чата (как при ручном «Добавить участника»).
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2 mb-3 max-h-[min(50vh,420px)] overflow-y-auto" data-allow-scroll>
+                {newUserChatGroupsCatalog.length === 0 ? (
+                  <div className="text-sm col-span-2" style={{ color: "var(--text-tertiary)" }}>
+                    Нет групп чата. Создайте группу или канал в разделе «Чат».
+                  </div>
+                ) : (
+                  newUserChatGroupsCatalog.map((g) => {
+                    const checked = newUserChatGroupIds.includes(g.id);
+                    return (
+                      <label
+                        key={g.id}
+                        className="flex items-center gap-2 px-3 py-2 rounded-md"
+                        style={{ backgroundColor: "var(--bg-secondary)", border: "1px solid var(--border)" }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => {
+                            const on = e.target.checked;
+                            setNewUserChatGroupIds((prev) =>
+                              on ? [...prev, g.id] : prev.filter((id) => id !== g.id),
+                            );
+                          }}
+                        />
+                        <span className="text-sm min-w-0" style={{ color: "var(--text-primary)" }}>
+                          {g.name}
+                          {g.is_channel ? (
+                            <span className="ml-1.5 text-xs" style={{ color: "var(--text-tertiary)" }}>
+                              (канал)
+                            </span>
+                          ) : null}
+                        </span>
+                      </label>
+                    );
+                  })
+                )}
+              </div>
+              <button
+                type="button"
+                className="px-4 py-2 rounded-md text-sm font-medium"
+                style={{
+                  backgroundColor: newUserChatGroupsSaving ? "var(--bg-secondary)" : "var(--accent)",
+                  color: newUserChatGroupsSaving ? "var(--text-secondary)" : "#fff",
+                  border: `1px solid ${newUserChatGroupsSaving ? "var(--border)" : "var(--accent)"}`,
+                }}
+                disabled={newUserChatGroupsSaving}
+                onClick={() => void saveNewUserChatGroups()}
+              >
+                {newUserChatGroupsSaving ? "Сохранение…" : "Сохранить группы чата"}
+              </button>
+              {newUserChatGroupsError && (
+                <div className="text-xs mt-2" style={{ color: "var(--error)" }}>
+                  {newUserChatGroupsError}
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+
+        {user?.is_admin && (
+          <section>
+            <div
+              className="rounded-lg p-5"
+              style={{ backgroundColor: "var(--bg-primary)", border: "1px solid var(--border)" }}
+            >
+              <div className="font-medium mb-1" style={{ color: "var(--text-primary)" }}>
                 Порядок разделов в сайдбаре
               </div>
               <div className="text-xs mb-3" style={{ color: "var(--text-secondary)" }}>
@@ -676,6 +875,7 @@ export default function Settings() {
                         <th className="text-left py-2 pr-3 font-medium">Офлайн JSON</th>
                         <th className="text-left py-2 pr-3 font-medium">Платформа</th>
                         <th className="text-left py-2 pr-3 font-medium">Устройство</th>
+                        <th className="text-left py-2 pr-3 font-medium min-w-[160px]">UID устройства</th>
                         <th className="text-left py-2 pr-3 font-medium">Последний визит</th>
                         <th className="text-right py-2 pl-2 font-medium w-24"> </th>
                       </tr>
@@ -697,8 +897,20 @@ export default function Settings() {
                           <td className="py-2 pr-3 align-top whitespace-nowrap">
                             {[row.platform, row.os_version].filter(Boolean).join(" ") || "—"}
                           </td>
-                          <td className="py-2 pr-3 align-top max-w-[160px] truncate" title={[row.device_manufacturer, row.device_model].filter(Boolean).join(" ") || ""}>
-                            {[row.device_manufacturer, row.device_model].filter(Boolean).join(" ") || "—"}
+                          <td
+                            className="py-2 pr-3 align-top max-w-[200px]"
+                            title={[row.device_manufacturer, row.device_model].filter(Boolean).join(" ") || undefined}
+                          >
+                            <span className="truncate inline-block max-w-full align-top">
+                              {[row.device_manufacturer, row.device_model].filter(Boolean).join(" ") || "—"}
+                            </span>
+                          </td>
+                          <td
+                            className="py-2 pr-3 align-top text-[11px] font-mono break-all max-w-[min(280px,28vw)]"
+                            style={{ color: "var(--text-primary)", wordBreak: "break-all" }}
+                            title={row.device_id ? `UID: ${row.device_id}` : undefined}
+                          >
+                            {row.device_id?.trim() ? row.device_id.trim() : "—"}
                           </td>
                           <td className="py-2 pr-3 align-top whitespace-nowrap text-[11px]" style={{ color: "var(--text-secondary)" }}>
                             {row.last_seen_at

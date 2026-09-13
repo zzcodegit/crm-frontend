@@ -1,7 +1,11 @@
 import { Link } from "react-router-dom";
 import { useMemo, useState } from "react";
 import { usePermissions } from "../contexts/PermissionsContext";
-import { APP_SECTIONS, type SectionKey } from "../permissions";
+import {
+  APP_SECTIONS,
+  isScheduleSectionEnabledForGroup,
+  type SectionKey,
+} from "../permissions";
 
 export default function SettingsPermissions() {
   const { groups, loading, groupPermissions, setGroupDeniedSections } = usePermissions();
@@ -19,8 +23,25 @@ export default function SettingsPermissions() {
     return new Set(groupPermissions[String(selectedGroup.id)] ?? []);
   }, [groupPermissions, selectedGroup]);
 
+  const isSectionEnabled = (sectionKey: SectionKey) => {
+    if (!selectedGroup) return true;
+    if (sectionKey === "scheduleManagement") {
+      return isScheduleSectionEnabledForGroup(groupPermissions, selectedGroup.id);
+    }
+    return !deniedForSelected.has(sectionKey);
+  };
+
   const toggleSection = (sectionKey: SectionKey) => {
     if (!selectedGroup) return;
+    const current = groupPermissions[String(selectedGroup.id)] ?? [];
+    if (sectionKey === "scheduleManagement") {
+      const enabled = isScheduleSectionEnabledForGroup(groupPermissions, selectedGroup.id);
+      const next = new Set(current);
+      if (enabled) next.add("scheduleManagement");
+      else next.delete("scheduleManagement");
+      setGroupDeniedSections(selectedGroup.id, [...next]);
+      return;
+    }
     const next = new Set(deniedForSelected);
     if (next.has(sectionKey)) next.delete(sectionKey);
     else next.add(sectionKey);
@@ -40,7 +61,7 @@ export default function SettingsPermissions() {
           Права групп по разделам
         </h1>
         <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
-          Выберите группу и отключите разделы. Отключенный раздел скрывается в меню и будет недоступен по URL.
+          Выберите группу и отключите разделы. Отключенный раздел скрывается в меню и будет недоступен по URL. «График работ» по умолчанию выключен — включите его отдельно для нужных групп.
         </p>
       </div>
 
@@ -77,16 +98,16 @@ export default function SettingsPermissions() {
               Доступ к разделам
             </h2>
             {APP_SECTIONS.map((section) => {
-              const denied = deniedForSelected.has(section.key);
+              const enabled = isSectionEnabled(section.key);
               return (
                 <label
                   key={section.key}
                   className="flex items-start gap-3 rounded-lg px-3 py-3 cursor-pointer"
-                  style={{ backgroundColor: denied ? "var(--error-light)" : "var(--bg-secondary)" }}
+                  style={{ backgroundColor: enabled ? "var(--bg-secondary)" : "var(--error-light)" }}
                 >
                   <input
                     type="checkbox"
-                    checked={!denied}
+                    checked={enabled}
                     onChange={() => toggleSection(section.key)}
                     className="mt-1"
                     style={{ accentColor: "var(--accent)" }}

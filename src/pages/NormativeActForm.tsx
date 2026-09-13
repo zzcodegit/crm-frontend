@@ -222,7 +222,9 @@ export default function NormativeActForm() {
         </div>
         <div className="mb-3 rounded-xl p-3" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}>
           <div className="text-xs font-semibold mb-2" style={{ color: "var(--text-secondary)" }}>Кому виден документ</div>
-          <div className="text-xs mb-2" style={{ color: "var(--text-tertiary)" }}>Если никого не выбрать — документ виден всем сотрудникам</div>
+          <div className="text-xs mb-2" style={{ color: "var(--text-tertiary)" }}>
+            Если никого не выбрать — документ виден всем сотрудникам. Если выбран один или несколько — документ увидят только они и вы (автор).
+          </div>
           <input
             value={userSearch}
             onChange={(e) => setUserSearch(e.target.value)}

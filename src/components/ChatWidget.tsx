@@ -1,8 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useLocation } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
-import { api } from "../api";
+import { api, type ChatNotificationSummary } from "../api";
 import ChatMessenger from "../pages/ChatMessenger";
+import {
+  hasSpecificChatOpenTarget,
+  parseChatOpenTarget,
+  stripChatOpenParams,
+  type ChatOpenTarget,
+} from "../utils/chatOpenNavigation";
 import { createPortal } from "react-dom";
 
 const FloatingChatIcon = () => (
@@ -16,35 +22,173 @@ const FloatingChatIcon = () => (
 export default function ChatWidget({ hideLauncher = false }: { hideLauncher?: boolean }) {
   const { user, loading } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
   const [open, setOpen] = useState(false);
-  const [openTarget, setOpenTarget] = useState<{ userId?: number; username?: string; nonce: number } | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [openTarget, setOpenTarget] = useState<ChatOpenTarget | null>(null);
   const [unreadCount, setUnreadCount] = useState(0);
   const [mounted, setMounted] = useState(false);
   const [lastUnreadMessageText, setLastUnreadMessageText] = useState<string>("");
   const lastPublishedRef = useRef<{ unreadCount: number; lastMessageText: string } | null>(null);
+  const lastUnreadOpenTargetRef = useRef<Omit<ChatOpenTarget, "nonce"> | null>(null);
   const prevUnreadCountRef = useRef<number | null>(null);
   const BROWSER_CHAT_NOTIFY_KEY = "chat_browser_notifications_enabled";
 
+function openTargetFromNotificationSummary(
+  summary: ChatNotificationSummary,
+): Omit<ChatOpenTarget, "nonce"> | null {
+  const messageId = Number(summary.last_message_id ?? 0);
+  if (!Number.isFinite(messageId) || messageId <= 0) return null;
+  const rawKind = (summary.last_message_chat_type || "").trim().toLowerCase();
+  const kind =
+    rawKind === "private" || rawKind === "group" || rawKind === "bot" || rawKind === "general"
+      ? rawKind
+      : "general";
+  const dialogId = Number(summary.last_message_dialog_id ?? 0);
+  const threadUserId = Number(summary.last_message_thread_user_id ?? 0);
+  const partial: Omit<ChatOpenTarget, "nonce"> = {
+    kind,
+    messageId,
+    dialogId: Number.isFinite(dialogId) && dialogId > 0 ? dialogId : undefined,
+    threadUserId: Number.isFinite(threadUserId) && threadUserId > 0 ? threadUserId : undefined,
+  };
+  return hasSpecificChatOpenTarget(partial) ? partial : null;
+}
+
+  const applyOpenTarget = useCallback((partial: Omit<ChatOpenTarget, "nonce">) => {
+    setOpenTarget({ ...partial, nonce: Date.now() });
+    setOpen(true);
+  }, []);
+
   useEffect(() => {
-    const onClose = () => setOpen(false);
+    const onClose = () => {
+      setOpen(false);
+      setExpanded(false);
+      setOpenTarget(null);
+    };
+    const onToggleExpand = () => setExpanded((v) => !v);
     const onOpen = (event: Event) => {
-      const e = event as CustomEvent<{ userId?: number; username?: string }>;
+      const e = event as CustomEvent<{
+        userId?: number;
+        username?: string;
+        kind?: ChatOpenTarget["kind"];
+        dialogId?: number;
+        messageId?: number;
+        threadUserId?: number;
+      }>;
       const userId = Number(e.detail?.userId);
-      const username = e.detail?.username;
-      setOpenTarget({
+      const dialogId = Number(e.detail?.dialogId);
+      const messageId = Number(e.detail?.messageId);
+      const threadUserId = Number(e.detail?.threadUserId);
+      const partial = {
+        kind:
+          e.detail?.kind ??
+          (Number.isFinite(threadUserId) && threadUserId > 0
+            ? ("bot" as const)
+            : Number.isFinite(dialogId) && dialogId > 0
+              ? ("group" as const)
+              : Number.isFinite(userId) && userId > 0
+                ? ("private" as const)
+                : ("general" as const)),
         userId: Number.isFinite(userId) && userId > 0 ? userId : undefined,
-        username: typeof username === "string" && username.trim().length > 0 ? username.trim() : undefined,
-        nonce: Date.now(),
-      });
-      setOpen(true);
+        username: typeof e.detail?.username === "string" && e.detail.username.trim() ? e.detail.username.trim() : undefined,
+        dialogId: Number.isFinite(dialogId) && dialogId > 0 ? dialogId : undefined,
+        messageId: Number.isFinite(messageId) && messageId > 0 ? messageId : undefined,
+        threadUserId: Number.isFinite(threadUserId) && threadUserId > 0 ? threadUserId : undefined,
+      };
+      if (!hasSpecificChatOpenTarget(partial)) {
+        setOpenTarget(null);
+        setOpen(true);
+        return;
+      }
+      applyOpenTarget(partial);
     };
     window.addEventListener("chatwidget:close", onClose);
+    window.addEventListener("chatwidget:toggle-expand", onToggleExpand);
     window.addEventListener("chatwidget:open", onOpen as EventListener);
     return () => {
       window.removeEventListener("chatwidget:close", onClose);
+      window.removeEventListener("chatwidget:toggle-expand", onToggleExpand);
       window.removeEventListener("chatwidget:open", onOpen as EventListener);
     };
+  }, [applyOpenTarget]);
+
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+    const onSwMessage = (event: MessageEvent) => {
+      const data = event.data as {
+        type?: string;
+        detail?: {
+          kind?: ChatOpenTarget["kind"];
+          dialogId?: number;
+          messageId?: number;
+          userId?: number;
+          username?: string;
+          threadUserId?: number;
+        };
+      } | null;
+      if (data?.type !== "crm-open-chat" || !data.detail) return;
+      const d = data.detail;
+      const partial = {
+        kind: d.kind ?? ("general" as const),
+        dialogId: d.dialogId,
+        messageId: d.messageId,
+        userId: d.userId,
+        username: d.username,
+        threadUserId: d.threadUserId,
+      };
+      if (!hasSpecificChatOpenTarget(partial)) {
+        setOpenTarget(null);
+        setOpen(true);
+        return;
+      }
+      applyOpenTarget(partial);
+    };
+    navigator.serviceWorker.addEventListener("message", onSwMessage);
+    return () => navigator.serviceWorker.removeEventListener("message", onSwMessage);
+  }, [applyOpenTarget]);
+
+  useEffect(() => {
+    if (location.pathname === "/chat") {
+      const params = new URLSearchParams(location.search);
+      if (!params.has("openChat")) params.set("openChat", "1");
+      const parsed = parseChatOpenTarget(params);
+      if (parsed) applyOpenTarget(parsed);
+      else setOpen(true);
+      navigate({ pathname: "/", search: stripChatOpenParams(params) }, { replace: true });
+      return;
+    }
+    const parsed = parseChatOpenTarget(location.search);
+    if (!parsed) return;
+    applyOpenTarget(parsed);
+    navigate({ pathname: location.pathname, search: stripChatOpenParams(location.search) }, { replace: true });
+  }, [location.pathname, location.search, navigate, applyOpenTarget]);
+
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent("chatwidget:expanded", { detail: { expanded } }));
+  }, [expanded]);
+
+  const [imageLightboxOpen, setImageLightboxOpen] = useState(false);
+
+  useEffect(() => {
+    const onOpen = () => setImageLightboxOpen(true);
+    const onClose = () => setImageLightboxOpen(false);
+    window.addEventListener("crm-chat-image-lightbox-open", onOpen);
+    window.addEventListener("crm-chat-image-lightbox-close", onClose);
+    return () => {
+      window.removeEventListener("crm-chat-image-lightbox-open", onOpen);
+      window.removeEventListener("crm-chat-image-lightbox-close", onClose);
+    };
   }, []);
+
+  useEffect(() => {
+    if (!open || !expanded || imageLightboxOpen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [open, expanded, imageLightboxOpen]);
 
   const publishNotificationState = (count: number, messageText: string) => {
     const normalizedCount = Math.max(0, count);
@@ -72,18 +216,13 @@ export default function ChatWidget({ hideLauncher = false }: { hideLauncher?: bo
     }
     // Полноэкранный /chat: сообщения просматриваются в ChatMessenger; не публикуем
     // устаревший счётчик в window.__crmChatNotify — иначе APK-пулл снова показывает уведомления.
-    if (location.pathname === "/chat") {
-      setUnreadCount(0);
-      setLastUnreadMessageText("");
-      publishNotificationState(0, "");
-      return;
-    }
     try {
       const summary = await api.chat.notificationsSummary();
       const count = Number(summary?.unread_count ?? 0);
       const text = (summary?.last_message_text ?? "").trim();
       setUnreadCount(count);
       setLastUnreadMessageText(text);
+      lastUnreadOpenTargetRef.current = count > 0 ? openTargetFromNotificationSummary(summary) : null;
       publishNotificationState(count, text);
     } catch {
       // fallback: keep previous count in case of temporary backend issue
@@ -103,12 +242,7 @@ export default function ChatWidget({ hideLauncher = false }: { hideLauncher?: bo
       publishNotificationState(0, "");
       return;
     }
-    if (location.pathname === "/chat") {
-      setUnreadCount(0);
-      setLastUnreadMessageText("");
-      publishNotificationState(0, "");
-    }
-  }, [location.pathname, loading, user?.id, user?.chat_notifications_enabled]);
+  }, [loading, user?.id, user?.chat_notifications_enabled]);
 
   useEffect(() => {
     if (loading || !user) return;
@@ -118,12 +252,31 @@ export default function ChatWidget({ hideLauncher = false }: { hideLauncher?: bo
       return;
     }
 
-    // когда закрыто — подсчитываем непрочитанное
+    // когда закрыто — подсчитываем непрочитанное (реже, если вкладка в фоне)
+    const pollMs = () => (typeof document !== "undefined" && document.hidden ? 60000 : 15000);
     fetchUnread();
-    const id = window.setInterval(fetchUnread, 6000);
-    return () => window.clearInterval(id);
+    let id = window.setInterval(fetchUnread, pollMs());
+    const onVisibility = () => {
+      void fetchUnread();
+      window.clearInterval(id);
+      id = window.setInterval(fetchUnread, pollMs());
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, loading, user?.id, user?.chat_notifications_enabled, location.pathname]);
+
+  useEffect(() => {
+    const onRefresh = () => {
+      void fetchUnread();
+    };
+    window.addEventListener("crm-chat-refresh-unread", onRefresh);
+    return () => window.removeEventListener("crm-chat-refresh-unread", onRefresh);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, user?.chat_notifications_enabled]);
 
   useEffect(() => {
     publishNotificationState(unreadCount, lastUnreadMessageText);
@@ -139,7 +292,7 @@ export default function ChatWidget({ hideLauncher = false }: { hideLauncher?: bo
     prevUnreadCountRef.current = unreadCount;
     if (prev == null) return;
     if (unreadCount <= prev) return;
-    if (open || location.pathname === "/chat") return;
+    if (open) return;
     if (typeof window === "undefined" || !("Notification" in window)) return;
     if (Notification.permission !== "granted") return;
     let enabled = false;
@@ -157,7 +310,12 @@ export default function ChatWidget({ hideLauncher = false }: { hideLauncher?: bo
     });
     notif.onclick = () => {
       window.focus();
-      window.dispatchEvent(new CustomEvent("chatwidget:open", { detail: {} }));
+      const target = lastUnreadOpenTargetRef.current;
+      window.dispatchEvent(
+        new CustomEvent("chatwidget:open", {
+          detail: target ?? {},
+        }),
+      );
       notif.close();
     };
   }, [unreadCount, lastUnreadMessageText, open, location.pathname, user]);
@@ -176,7 +334,10 @@ export default function ChatWidget({ hideLauncher = false }: { hideLauncher?: bo
         <button
           type="button"
           aria-label="Открыть чат"
-          onClick={() => setOpen(true)}
+          onClick={() => {
+            setOpenTarget(null);
+            setOpen(true);
+          }}
           className="chat-widget-button fixed z-[80] w-14 h-14 rounded-3xl flex items-center justify-center text-white shadow-elevated animate-chat-bubble relative"
           style={{
             right: 16,
@@ -209,27 +370,39 @@ export default function ChatWidget({ hideLauncher = false }: { hideLauncher?: bo
 
       {open && (
         <>
+          {!expanded ? (
+            <div
+              className="fixed inset-0 z-[85]"
+              style={{
+                backgroundColor: "rgba(0,0,0,0.35)",
+                backdropFilter: "blur(6px)",
+              }}
+              onClick={() => setOpen(false)}
+            />
+          ) : null}
           <div
-            className="fixed inset-0 z-[85]"
-            style={{
-              backgroundColor: "rgba(0,0,0,0.35)",
-              backdropFilter: "blur(6px)",
-            }}
-            onClick={() => setOpen(false)}
-          />
-          <div
-            className="chat-widget-panel fixed z-[90] top-0 right-0 bottom-0 flex flex-col overflow-hidden min-h-0"
-            style={{
-              width: "50vw",
-              maxWidth: "50vw",
-              backgroundColor: "var(--bg-secondary)",
-              borderLeft: "1px solid var(--border)",
-              right: 0,
-              left: "auto",
-              borderTopLeftRadius: 18,
-              borderBottomLeftRadius: 18,
-              boxShadow: "0 18px 60px rgba(0,0,0,0.28)",
-            }}
+            className={`chat-widget-panel fixed flex flex-col overflow-hidden min-h-0 ${
+              expanded ? "chat-widget-panel--fullscreen z-[200]" : "z-[90] top-0 right-0 bottom-0"
+            }`}
+            style={
+              expanded
+                ? {
+                    inset: 0,
+                    width: "100vw",
+                    maxWidth: "100vw",
+                    height: "100dvh",
+                    backgroundColor: "var(--bg-secondary)",
+                  }
+                : {
+                    backgroundColor: "var(--bg-secondary)",
+                    borderLeft: "1px solid var(--border)",
+                    right: 0,
+                    left: "auto",
+                    borderTopLeftRadius: 18,
+                    borderBottomLeftRadius: 18,
+                    boxShadow: "0 18px 60px rgba(0,0,0,0.28)",
+                  }
+            }
           >
             <div
               className="flex flex-shrink-0 items-center justify-between p-2 sm:p-4"
@@ -249,18 +422,20 @@ export default function ChatWidget({ hideLauncher = false }: { hideLauncher?: bo
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={() => setOpen(false)}
-                className="px-2 py-1.5 rounded-lg text-xs sm:text-sm font-medium"
-                style={{ backgroundColor: "var(--bg-secondary)", color: "var(--text-secondary)" }}
-              >
-                Закрыть
-              </button>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setOpen(false)}
+                  className="px-2 py-1.5 rounded-lg text-xs sm:text-sm font-medium"
+                  style={{ backgroundColor: "var(--bg-secondary)", color: "var(--text-secondary)" }}
+                >
+                  Закрыть
+                </button>
+              </div>
             </div>
 
-            <div className="flex-1 min-h-0 flex flex-col animate-slide-in overflow-hidden">
-              <ChatMessenger openPrivateTarget={openTarget} />
+            <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+              <ChatMessenger variant="widget" openChatTarget={openTarget} />
             </div>
           </div>
         </>

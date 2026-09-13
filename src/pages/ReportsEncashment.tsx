@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import ReportsSubnav from "../components/ReportsSubnav";
 import { api, type EncashmentSummaryResponse, type ReportItem, type WarehouseItem } from "../api";
 
 const YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -190,6 +191,8 @@ export default function ReportsEncashment() {
           ← К списку отчётов
         </Link>
       </div>
+
+      <ReportsSubnav active="encashment" />
 
       <div className="rounded-2xl p-5 mb-6 border shadow-sm" style={{ borderColor: "var(--border)", background: "var(--bg-primary)" }}>
         <div className="flex flex-wrap items-end gap-4">

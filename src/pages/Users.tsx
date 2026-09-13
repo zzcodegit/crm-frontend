@@ -181,6 +181,15 @@ export default function Users() {
               />
             </div>
             <Link 
+              to="/settings/users/bulk" 
+              className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-md text-sm font-semibold transition-all"
+              style={{ backgroundColor: 'var(--bg-primary)', color: 'var(--accent)', border: '1px solid var(--border)' }}
+              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'var(--accent-light)'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'var(--bg-primary)'; }}
+            >
+              Массовое редактирование
+            </Link>
+            <Link 
               to="/settings/users/new" 
               className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-md text-sm font-semibold text-white transition-all"
               style={{ backgroundColor: 'var(--accent)' }}

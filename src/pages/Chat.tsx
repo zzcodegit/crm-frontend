@@ -22,10 +22,12 @@ function mediaFromFile(file: File): ChatMediaType | null {
 
 function ChatAudioPlayer({ src }: { src: string }) {
   const mediaRef = useRef<HTMLAudioElement | null>(null);
+  const playAttemptRef = useRef(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [duration, setDuration] = useState<number | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [useNativeFallback, setUseNativeFallback] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
 
   const fmt = (seconds: number) => {
     const safe = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
@@ -34,25 +36,65 @@ function ChatAudioPlayer({ src }: { src: string }) {
     return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   };
 
-  const togglePlay = async () => {
+  useEffect(() => {
     const el = mediaRef.current;
-    if (!el) return;
+    if (!el || !src) return;
     try {
-      if (el.paused) {
-        if (el.ended) {
-          try {
-            el.currentTime = 0;
-          } catch {
-            // ignore
-          }
-        }
-        await el.play();
-      } else {
-        el.pause();
-      }
+      el.load();
     } catch {
-      setUseNativeFallback(true);
+      /* ignore */
     }
+  }, [src]);
+
+  const togglePlay = () => {
+    const el = mediaRef.current;
+    if (!el || !src) return;
+    if (!el.paused) {
+      el.pause();
+      return;
+    }
+    if (el.ended) {
+      try {
+        el.currentTime = 0;
+      } catch {
+        /* ignore */
+      }
+    }
+    const attemptId = ++playAttemptRef.current;
+    setIsLoading(true);
+    const finish = () => {
+      if (playAttemptRef.current === attemptId) setIsLoading(false);
+    };
+    const tryPlay = () =>
+      el.play().then(finish).catch(() => {
+        if (playAttemptRef.current !== attemptId) return;
+        if (el.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+          setUseNativeFallback(true);
+          finish();
+          return;
+        }
+        const onReady = () => {
+          el.removeEventListener("canplay", onReady);
+          el.removeEventListener("error", onErr);
+          void el.play().then(finish).catch(() => {
+            setUseNativeFallback(true);
+            finish();
+          });
+        };
+        const onErr = () => {
+          el.removeEventListener("canplay", onReady);
+          setUseNativeFallback(true);
+          finish();
+        };
+        el.addEventListener("canplay", onReady, { once: true });
+        el.addEventListener("error", onErr, { once: true });
+        try {
+          el.load();
+        } catch {
+          /* ignore */
+        }
+      });
+    void tryPlay();
   };
 
   const reliableDuration = duration && duration > 1.5 ? duration : null;
@@ -70,7 +112,7 @@ function ChatAudioPlayer({ src }: { src: string }) {
       <audio
         ref={mediaRef}
         src={src}
-        preload="metadata"
+        preload="auto"
         className="hidden"
         onLoadedMetadata={(e) => {
           const d = Number(e.currentTarget.duration || 0);
@@ -94,14 +136,22 @@ function ChatAudioPlayer({ src }: { src: string }) {
       <div className="flex items-center gap-2">
         <button
           type="button"
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+          }}
           onClick={(e) => {
             e.stopPropagation();
-            void togglePlay();
+            e.preventDefault();
+            togglePlay();
           }}
-          className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0"
+          className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 touch-manipulation"
           style={{ backgroundColor: "var(--accent)", color: "#fff" }}
+          disabled={isLoading && !isPlaying}
         >
-          {isPlaying ? (
+          {isLoading && !isPlaying ? (
+            <span className="w-3.5 h-3.5 rounded-full border-2 border-white/40 border-t-white animate-spin" />
+          ) : isPlaying ? (
             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
               <rect x="6" y="5" width="4" height="14" rx="1" />
               <rect x="14" y="5" width="4" height="14" rx="1" />
@@ -195,7 +245,7 @@ export default function Chat() {
     if (!silent) setGeneralLoading(true);
     try {
       setGeneralLeft(false);
-      const msgs = await api.chat.general.messages(undefined, 80);
+      const msgs = await api.chat.general.messages({ limit: 80 });
       setGeneralMessages(msgs);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Ошибка загрузки сообщений";
@@ -220,7 +270,7 @@ export default function Chat() {
     const silent = opts?.silent ?? false;
     if (!silent) setDialogLoading(true);
     try {
-      const msgs = await api.chat.privateDialogs.messages(dialogId, undefined, 80);
+      const msgs = await api.chat.privateDialogs.messages(dialogId, { limit: 80 });
       setPrivateMessages(msgs);
     } finally {
       if (!silent) setDialogLoading(false);

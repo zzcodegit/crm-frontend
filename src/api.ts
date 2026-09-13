@@ -1,3 +1,5 @@
+import { isNativeAppShell } from "./utils/nativeApp";
+
 const API_BASE = "/api";
 const PRICELIST_OFFLINE_CACHE_VERSION = 2;
 const PRICELIST_OFFLINE_KEY = `pricelist-offline-v${PRICELIST_OFFLINE_CACHE_VERSION}`;
@@ -120,7 +122,11 @@ async function writePricelistOfflineStoreToNativeStorage(next: PricelistOfflineS
   const plugin = getCapacitorPreferencesPlugin();
   if (!plugin) return;
   try {
-    await plugin.set({ key: PRICELIST_OFFLINE_NATIVE_KEY, value: JSON.stringify(next) });
+    const serialized = JSON.stringify(next);
+    // На Android Capacitor Preferences идёт через Binder (~1MB на транзакцию). Полный прайс
+    // в JSON легко превышает лимит и даёт пики памяти/LMK — приложение «само закрывается».
+    if (serialized.length > 950_000) return;
+    await plugin.set({ key: PRICELIST_OFFLINE_NATIVE_KEY, value: serialized });
   } catch {
     // ignore native storage errors
   }
@@ -224,15 +230,51 @@ async function writePricelistOfflineStore(next: PricelistOfflineStore): Promise<
     }
   });
   writePricelistOfflineStoreToLocalStorage(next);
-  await writePricelistOfflineStoreToNativeStorage(next);
+  // Не дублируем в Capacitor Preferences при живом IDB: см. writePricelistOfflineStoreToNativeStorage.
+}
+
+function apkRemoteAssetOrigin(): string | null {
+  if (typeof window === "undefined") return null;
+  const v = (window as unknown as { __mosoptikaRemoteOrigin?: unknown }).__mosoptikaRemoteOrigin;
+  if (typeof v === "string" && /^https?:\/\//.test(v)) return v.replace(/\/$/, "");
+  /** Capacitor отдаёт бандл с `https://localhost`; без shim `__mosoptikaRemoteOrigin` статика `/uploads/*` оказывается на прод-домене. */
+  try {
+    const { hostname, protocol } = window.location;
+    const h = hostname.toLowerCase();
+    const port = window.location.port;
+    if ((h === "localhost" || h === "127.0.0.1") && protocol === "https:" && port !== "5173" && port !== "4173") {
+      const fromEnv = (import.meta.env.VITE_REMOTE_ASSET_ORIGIN as string | undefined)?.trim();
+      if (fromEnv && /^https?:\/\//.test(fromEnv)) return fromEnv.replace(/\/$/, "");
+      return "https://mosoptika-study.ru";
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
 }
 
 function normalizeAssetUrl(url: string): string {
   const raw = (url || "").trim();
   if (!raw) return "";
-  if (raw.startsWith("http://") || raw.startsWith("https://")) return raw;
+  if (raw.startsWith("http://") || raw.startsWith("https://")) {
+    try {
+      const u = new URL(raw);
+      const remote = apkRemoteAssetOrigin();
+      const h = u.hostname.toLowerCase();
+      if (remote && (h === "localhost" || h === "127.0.0.1") && u.pathname.startsWith("/uploads/")) {
+        return `${remote}${u.pathname}${u.search}`;
+      }
+    } catch {
+      /* ignore */
+    }
+    return raw;
+  }
   if (raw.startsWith("//")) return `${window.location.protocol}${raw}`;
-  if (raw.startsWith("/")) return `${window.location.origin}${raw}`;
+  if (raw.startsWith("/")) {
+    const remote = apkRemoteAssetOrigin();
+    if (remote && raw.startsWith("/uploads/")) return `${remote}${raw}`;
+    return `${window.location.origin}${raw}`;
+  }
   return raw;
 }
 
@@ -286,16 +328,26 @@ async function cacheAssetUrl(assetUrl: string): Promise<CacheAssetResult> {
   if (!normalized) return { ok: false, fromCache: false, downloadedBytes: 0 };
   const already = await readCachedAssetBlob(normalized);
   if (already) return { ok: true, fromCache: true, downloadedBytes: 0 };
-  try {
-    const resp = await fetch(normalized, { method: "GET" });
-    if (!resp.ok) return { ok: false, fromCache: false, downloadedBytes: 0 };
-    const blob = await resp.blob();
-    if (!blob || blob.size <= 0) return { ok: false, fromCache: false, downloadedBytes: 0 };
-    await writeCachedAssetBlob(normalized, blob);
-    return { ok: true, fromCache: false, downloadedBytes: blob.size };
-  } catch {
-    return { ok: false, fromCache: false, downloadedBytes: 0 };
+  const isVideo = /\.(mp4|webm|mov)(\?|$)/i.test(normalized);
+  const maxTries = isNativeAppShell() && isVideo ? 4 : 2;
+  for (let attempt = 0; attempt < maxTries; attempt++) {
+    if (attempt > 0) {
+      await new Promise<void>((r) => {
+        window.setTimeout(() => r(), 350 * attempt);
+      });
+    }
+    try {
+      const resp = await fetch(normalized, { method: "GET", cache: "no-store" });
+      if (!resp.ok) continue;
+      const blob = await resp.blob();
+      if (!blob || blob.size <= 0) continue;
+      await writeCachedAssetBlob(normalized, blob);
+      return { ok: true, fromCache: false, downloadedBytes: blob.size };
+    } catch {
+      /* retry */
+    }
   }
+  return { ok: false, fromCache: false, downloadedBytes: 0 };
 }
 
 function collectAssetUrlsFromPricelistItems(items: PricelistItemResponse[]): string[] {
@@ -469,11 +521,29 @@ export interface UserItem {
   telegram_id?: string | null;
   phone?: string | null;
   birth_date?: string | null;
+  /** Цвет сотрудника для расписания (HEX, например #ff0000). */
+  schedule_color?: string | null;
   group_ids?: number[];
   last_login_at?: string | null;
   /** false — не показывать бейдж и не слать push о новых сообщениях */
   chat_notifications_enabled?: boolean;
   avatar_url?: string | null;
+  chat_wallpaper_id?: number | null;
+  chat_wallpaper_url?: string | null;
+}
+
+export interface ChatWallpaperItem {
+  id: number;
+  title: string;
+  url: string;
+  thumb_url?: string | null;
+  sort_order?: number;
+}
+
+export interface ChatWallpaperSettings {
+  wallpaper_id: number | null;
+  wallpaper_url: string | null;
+  resolved_url: string | null;
 }
 export interface GroupItem {
   id: number;
@@ -483,8 +553,59 @@ export interface SidebarVideoSettings {
   video_url: string | null;
   visible_group_ids: number[];
 }
+export interface GigaChatSettings {
+  enabled: boolean;
+  visible_group_ids: number[];
+}
 export interface SidebarMenuOrderSettings {
   order: string[];
+}
+
+export interface InfoPageSettings {
+  text: string;
+  updated_at?: string | null;
+}
+
+export interface NewUserChatGroupOption {
+  id: number;
+  name: string;
+  is_channel?: boolean;
+}
+
+export interface NewUserChatGroupsSettings {
+  dialog_ids: number[];
+  dialogs?: NewUserChatGroupOption[];
+}
+
+/** Регистрация мобильного клиента (POST /api/mobile/clients/ping). */
+export interface MobileClientPingPayload {
+  device_id: string;
+  app_slug?: string;
+  native_version?: string | null;
+  native_build?: number | null;
+  bundle_version?: string | null;
+  offline_data_version?: string | null;
+  platform?: string;
+  os_version?: string | null;
+  device_model?: string | null;
+  device_manufacturer?: string | null;
+}
+
+export interface MobileClientRow {
+  id: number;
+  device_id: string;
+  username: string | null;
+  app_slug: string;
+  native_version: string | null;
+  native_build: number | null;
+  bundle_version: string | null;
+  offline_data_version: string | null;
+  platform: string;
+  os_version: string | null;
+  device_model: string | null;
+  device_manufacturer: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
 }
 
 /** Регистрация мобильного клиента (POST /api/mobile/clients/ping). */
@@ -641,7 +762,14 @@ export interface WarehouseItem {
   organization_name?: string | null;
   manager_id?: number | null;
   manager_name?: string | null;
+  sort_order?: number;
   opening_hours?: WarehouseOpeningHours | null;
+  hide_in_reports?: boolean;
+}
+
+/** Склады без флага hide_in_reports (отчёты, график работ, главная). */
+export function warehousesVisibleInReports(warehouses: WarehouseItem[]): WarehouseItem[] {
+  return warehouses.filter((w) => !w.hide_in_reports);
 }
 
 export interface ReportItem {
@@ -653,6 +781,8 @@ export interface ReportItem {
   user_username: string;
   warehouse_id: number | null;
   warehouse_name: string;
+  /** Комментарий к отчёту (свободный текст). */
+  comment?: string | null;
   utro: number | null;
   revenue: number | null;
   nal: number | null;
@@ -677,9 +807,13 @@ export interface ReportItem {
     amount: number;
     taken_reason_id?: number | null;
     taken_source_id?: number | null;
+    taken_reason_name?: string | null;
+    taken_source_name?: string | null;
+    linked_debt_date?: string | null;
     order_percent?: number | null;
     report_month?: string | null;
     warehouse_id: number | null;
+    warehouse_name?: string | null;
     linked_debt_row_uid?: string | null;
     linked_debt_report_id?: number | null;
   }[];
@@ -694,12 +828,14 @@ export interface ReportItem {
     debt_row_uid?: string | null;
   }[];
   has_expenses?: boolean;
-  expenses?: { amount: number; expense_article_id: number }[];
+  expenses?: { amount: number; expense_article_id: number; taken_source_id?: number | null }[];
   z_report_urls: string[];
   card_reconciliation_urls: string[];
   has_encashment?: boolean;
   encashment_nal?: number | null;
   encashment_bn?: number | null;
+  /** Погашение ручных удержаний в отчёте (увеличивает наличные в кассе). */
+  withholding_details?: { withholding_id: number; amount: number }[];
 }
 
 /** Выплата из центральной кассы (админ-учёт) */
@@ -782,10 +918,12 @@ export interface AvailableDebtRow {
   amount: number;
   order_number: string;
   debt_reason_id?: number | null;
+  debt_reason_name?: string | null;
   report_month?: string | null;
   warehouse_id?: number | null;
   warehouse_name?: string | null;
   manual_debt_id?: number | null;
+  admin_note?: string | null;
 }
 
 export interface DebtTakeEventItem {
@@ -866,6 +1004,25 @@ export interface EmployeeLedgerResponse {
   lines: EmployeeLedgerLine[];
 }
 
+export interface EmployeeSalaryWithholdingItem {
+  id: number;
+  amount: number;
+  reason?: string | null;
+  note?: string | null;
+  report_month?: string | null;
+  warehouse_name?: string | null;
+}
+
+export interface EmployeeSalaryBalanceResponse {
+  user_id: number;
+  central_cash_issued: number;
+  vzyala_taken: number;
+  /** Открытые ручные удержания (инфо для блока отчёта; на баланс не влияют). */
+  manual_withholdings?: number;
+  withholding_items?: EmployeeSalaryWithholdingItem[];
+  balance: number;
+}
+
 export interface ManualWithholdingRow {
   id: number;
   created_at?: string | null;
@@ -879,6 +1036,10 @@ export interface ManualWithholdingRow {
   note?: string | null;
   recorded_by_user_id?: number | null;
   recorded_by_name?: string | null;
+  closed?: boolean;
+  closed_at?: string | null;
+  closed_by_user_id?: number | null;
+  closed_by_name?: string | null;
 }
 
 export interface PricelistGroupItem {
@@ -888,6 +1049,8 @@ export interface PricelistGroupItem {
   display_properties_in_list: boolean;
   display_as_tiles?: boolean;
   tiles_per_page?: number;
+  /** Только для RX: все позиции группы скрыты от обычных пользователей */
+  admin_only?: boolean;
 }
 
 export interface CountryItem {
@@ -902,6 +1065,8 @@ export interface ManufacturerItem {
   description?: string;
   country_id?: number;
   image_url?: string;
+  /** Цвет рамки для логотипа в прайсе (HEX, например #ff0000). */
+  border_color?: string | null;
   catalog_pdf_url?: string | null;
   show_in_lens_catalog?: boolean;
   open_pdf_in_lens_catalog?: boolean;
@@ -928,6 +1093,8 @@ export interface PricelistItemResponse {
   id: number;
   manufacturer_id: number | null;
   manufacturer_name: string;
+  manufacturer_image_url?: string | null;
+  manufacturer_country_name?: string | null;
   lens_name: string;
   description?: string | null;
   full_description?: string | null;
@@ -1090,6 +1257,38 @@ export interface TrainingArticleItem {
   updated_at?: string | null;
 }
 
+export interface TrainingArticleListItem {
+  id: number;
+  title: string;
+  section: string;
+  preview_image_url?: string | null;
+  is_published: boolean;
+  created_by_user_id?: number | null;
+  created_by_username?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface TrainingArticleViewReportItem {
+  user_id: number;
+  username: string;
+  display_name: string;
+  visited: boolean;
+  first_viewed_at?: string | null;
+  last_viewed_at?: string | null;
+  view_count: number;
+}
+
+export interface TrainingArticleAnalyticsItem {
+  article_id: number;
+  title: string;
+  section: string;
+  is_published: boolean;
+  unique_viewers: number;
+  total_views: number;
+  last_viewed_at?: string | null;
+}
+
 export type TrainingQuestionType =
   | "single"
   | "multi"
@@ -1236,7 +1435,7 @@ export interface ProductCharItem {
 
 // --- Chat ---
 
-export type ChatMediaType = "image" | "video" | "audio";
+export type ChatMediaType = "image" | "video" | "audio" | "sticker" | "file";
 
 export interface ChatAttachment {
   id: number;
@@ -1254,21 +1453,141 @@ export interface ChatMessageSender {
   avatar_url?: string | null;
 }
 
+export interface ChatPollOption {
+  id: number;
+  text: string;
+  position: number;
+  vote_count: number;
+}
+
+export interface ChatPoll {
+  id: number;
+  question: string;
+  allows_multiple: boolean;
+  total_voters: number;
+  my_option_ids: number[];
+  options: ChatPollOption[];
+}
+
+export type ChatPollCreatePayload = {
+  question: string;
+  options: string[];
+  allows_multiple: boolean;
+  reply_to_message_id?: number | null;
+};
+
+export interface ChatBotThreadItem {
+  user: ChatUserShortResponse;
+  last_message_text: string | null;
+  last_message_at: string | null;
+  unread_count: number;
+  is_closed?: boolean;
+  closed_at?: string | null;
+}
+
+export interface ChatSearchMessageHit {
+  message_id: number;
+  chat_type: "general" | "private" | "group" | "bot";
+  private_dialog_id: number | null;
+  group_dialog_id: number | null;
+  bot_thread_user_id: number | null;
+  chat_title: string;
+  preview_text: string | null;
+  sender_name: string | null;
+  created_at: string | null;
+}
+
+export interface ChatSearchResponse {
+  users: ChatUserShortResponse[];
+  messages: ChatSearchMessageHit[];
+}
+
+export interface ChatReactionSummary {
+  emoji: string;
+  count: number;
+  reacted_by_me: boolean;
+}
+
 export interface ChatMessageItem {
   id: number;
   private_dialog_id: number | null;
   group_dialog_id?: number | null;
+  bot_thread_user_id?: number | null;
   sender: ChatMessageSender | null;
   display_text: string | null;
   is_deleted: boolean;
   created_at: string | null;
   edited_at: string | null;
   attachments: ChatAttachment[];
+  poll?: ChatPoll | null;
+  reactions?: ChatReactionSummary[];
   reply_to_message_id?: number | null;
   reply_to_text?: string | null;
   reply_to_sender_name?: string | null;
   reply_to_is_deleted?: boolean;
   is_read?: boolean;
+  read_count?: number;
+  recipient_count?: number;
+  ack_required?: boolean;
+  ack_count?: number;
+  ack_recipient_count?: number;
+  user_acknowledged?: boolean;
+}
+
+export interface ChatMessageReadUserItem {
+  user: ChatUserShortResponse;
+  read_at: string | null;
+}
+
+export type ChatSharedMediaCategory = "photos" | "videos" | "voice" | "files" | "links";
+
+export interface ChatSharedMediaItem {
+  message_id: number;
+  attachment_id?: number | null;
+  url?: string | null;
+  media_type?: string | null;
+  filename?: string | null;
+  mime_type?: string | null;
+  link_url?: string | null;
+  preview_text?: string | null;
+  created_at?: string | null;
+  sender_name?: string | null;
+}
+
+export interface ChatSharedMediaResponse {
+  items: ChatSharedMediaItem[];
+  total: number;
+}
+
+type ChatMessagesQueryOpts = {
+  afterId?: number;
+  beforeId?: number;
+  aroundId?: number;
+  limit?: number;
+};
+
+function chatMessagesQueryString(opts?: ChatMessagesQueryOpts): string {
+  const params = new URLSearchParams();
+  if (opts?.afterId != null) params.set("after_id", String(opts.afterId));
+  if (opts?.beforeId != null) params.set("before_id", String(opts.beforeId));
+  if (opts?.aroundId != null) params.set("around_id", String(opts.aroundId));
+  params.set("limit", String(opts?.limit ?? 50));
+  return params.toString();
+}
+
+function chatSharedMediaQueryString(category: ChatSharedMediaCategory, offset: number, limit: number): string {
+  const params = new URLSearchParams();
+  params.set("category", category);
+  params.set("offset", String(offset));
+  params.set("limit", String(limit));
+  return params.toString();
+}
+
+export interface ChatMessageReadsResponse {
+  message_id: number;
+  read: ChatMessageReadUserItem[];
+  unread: ChatMessageReadUserItem[];
+  recipient_count: number;
 }
 
 export interface ChatUserShortResponse {
@@ -1277,6 +1596,36 @@ export interface ChatUserShortResponse {
   display_name: string;
   is_active: boolean;
   avatar_url?: string | null;
+}
+
+export interface ChatBirthdayReminderRuleInput {
+  enabled: boolean;
+  days_before: number;
+  notify_time: string;
+  recipient_user_ids: number[];
+}
+
+export interface ChatBirthdayReminderRuleResponse {
+  id: number;
+  enabled: boolean;
+  days_before: number;
+  notify_time: string;
+  recipient_users: ChatUserShortResponse[];
+}
+
+export interface ChatBirthdayReminderSettingsResponse {
+  subject_user_id: number;
+  subject_birth_date: string | null;
+  rules: ChatBirthdayReminderRuleResponse[];
+}
+
+export interface ChatUserProfileResponse {
+  id: number;
+  username: string;
+  display_name: string;
+  avatar_url?: string | null;
+  phone?: string | null;
+  birth_date?: string | null;
 }
 
 export interface PrivateDialogItem {
@@ -1293,13 +1642,28 @@ export interface PrivateDialogItem {
   has_unread?: boolean;
 }
 
+export interface GeneralChatStatus {
+  is_member: boolean;
+  has_unread: boolean;
+  last_message_text?: string | null;
+  last_message_at?: string | null;
+}
+
 export interface GroupDialogItem {
   id: number;
   name: string;
   image_url?: string | null;
+  /** Запрет выхода для консультантов (настраивает админ группы). */
+  forbid_exit?: boolean;
+  /** Информационный канал: писать могут только администраторы. */
+  is_channel?: boolean;
+  /** Участники видят только свои сообщения; админы группы и CRM — всю переписку. */
+  members_see_own_only?: boolean;
   last_message_text: string | null | undefined;
   last_message_at: string | null | undefined;
   has_unread?: boolean;
+  /** Уведомления push/бейдж для этой группы у текущего пользователя. */
+  notifications_enabled?: boolean;
 }
 
 export interface GroupMemberItem {
@@ -1310,11 +1674,29 @@ export interface GroupMemberItem {
   left_at: string | null | undefined;
 }
 
+export interface ChatFolderItem {
+  id: number;
+  chat_type: "private" | "group" | string;
+  private_dialog_id: number | null;
+  group_dialog_id: number | null;
+}
+
+export interface ChatFolder {
+  id: number;
+  name: string;
+  position: number;
+  items: ChatFolderItem[];
+}
+
 export interface ChatNotificationSummary {
   unread_count: number;
   last_message_text?: string | null;
   last_message_sender?: string | null;
   last_message_chat?: string | null;
+  last_message_id?: number | null;
+  last_message_chat_type?: "general" | "private" | "group" | "bot" | string | null;
+  last_message_dialog_id?: number | null;
+  last_message_thread_user_id?: number | null;
 }
 
 /** Не больше `le` в GET /chat/users. Старый прод: 100; после обновления бэкенда (le≥500) можно поднять до 500. */
@@ -1339,6 +1721,7 @@ export const api = {
         is_admin: boolean;
         is_manager?: boolean;
         is_consultant?: boolean;
+        is_reportnik?: boolean;
         role?: string;
         impersonator_username?: string | null;
       }
@@ -1350,6 +1733,7 @@ export const api = {
         is_admin: boolean;
         is_manager?: boolean;
         is_consultant?: boolean;
+        is_reportnik?: boolean;
         role?: string;
         impersonator_username?: string | null;
       }
@@ -1369,8 +1753,29 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ fio }),
     }),
-  updateUser: (id: number, data: { first_name?: string; last_name?: string; patronymic?: string; telegram_id?: string; phone?: string; birth_date?: string | null; is_active?: boolean; password?: string }) =>
+  updateUser: (
+    id: number,
+    data: {
+      username?: string;
+      first_name?: string;
+      last_name?: string;
+      patronymic?: string;
+      telegram_id?: string;
+      phone?: string;
+      birth_date?: string | null;
+      schedule_color?: string | null;
+      is_active?: boolean;
+      password?: string;
+    }
+  ) =>
     request<UserItem>(`/users/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  getBirthdayChatReminders: (userId: number) =>
+    request<ChatBirthdayReminderSettingsResponse>(`/users/${userId}/birthday-chat-reminders`),
+  putBirthdayChatReminders: (userId: number, rules: ChatBirthdayReminderRuleInput[]) =>
+    request<ChatBirthdayReminderSettingsResponse>(`/users/${userId}/birthday-chat-reminders`, {
+      method: "PUT",
+      body: JSON.stringify({ rules }),
+    }),
   deleteUser: (id: number) => request(`/users/${id}`, { method: "DELETE" }),
   getGroups: () => request<GroupItem[]>("/groups"),
   getGroup: (id: number) => request<GroupItem>(`/groups/${id}`),
@@ -1396,6 +1801,15 @@ export const api = {
         visible_group_ids: data.visible_group_ids ?? [],
       }),
     }),
+  getGigaChatSettings: () => request<GigaChatSettings>("/settings/gigachat"),
+  updateGigaChatSettings: (data: { enabled: boolean; visible_group_ids: number[] }) =>
+    request<GigaChatSettings>("/settings/gigachat", {
+      method: "PUT",
+      body: JSON.stringify({
+        enabled: Boolean(data.enabled),
+        visible_group_ids: data.visible_group_ids ?? [],
+      }),
+    }),
   getSidebarMenuOrderSettings: () => request<SidebarMenuOrderSettings>("/settings/sidebar-menu-order"),
   updateSidebarMenuOrderSettings: (data: { order: string[] }) =>
     request<SidebarMenuOrderSettings>("/settings/sidebar-menu-order", {
@@ -1404,6 +1818,17 @@ export const api = {
         order: data.order ?? [],
       }),
     }),
+  settings: {
+    getInfoPage: () => request<InfoPageSettings>("/settings/info-page"),
+    updateInfoPage: (d: { text: string }) =>
+      request<InfoPageSettings>("/settings/info-page", { method: "PUT", body: JSON.stringify({ text: d.text }) }),
+  },
+  getNewUserChatGroups: () => request<NewUserChatGroupsSettings>("/settings/new-user-chat-groups"),
+  updateNewUserChatGroups: (dialog_ids: number[]) =>
+    request<NewUserChatGroupsSettings>("/settings/new-user-chat-groups", {
+      method: "PUT",
+      body: JSON.stringify({ dialog_ids }),
+    }),
   getReportRequiredFields: () => request<{ required: string[] }>("/settings/report-required-fields"),
   updateReportRequiredFields: (required: string[]) =>
     request<{ required: string[] }>("/settings/report-required-fields", {
@@ -1411,21 +1836,29 @@ export const api = {
       body: JSON.stringify({ required }),
     }),
   getReportsTableColumns: () =>
-    request<{ default_columns: string[]; mine_columns: string[] | null }>("/settings/reports-table-columns"),
-  updateReportsTableColumnsDefault: (columns: string[]) =>
-    request<{ columns: string[] }>("/settings/reports-table-columns/default", {
+    request<{
+      default_columns: string[];
+      default_labels: Record<string, string>;
+      mine_columns: string[] | null;
+      mine_labels: Record<string, string> | null;
+    }>("/settings/reports-table-columns"),
+  updateReportsTableColumnsDefault: (payload: { columns: string[]; labels?: Record<string, string> }) =>
+    request<{ columns: string[]; labels: Record<string, string> }>("/settings/reports-table-columns/default", {
       method: "PUT",
-      body: JSON.stringify({ columns }),
+      body: JSON.stringify(payload),
     }),
-  updateReportsTableColumnsMine: (columns: string[]) =>
-    request<{ columns: string[] }>("/settings/reports-table-columns/mine", {
+  updateReportsTableColumnsMine: (payload: { columns: string[]; labels?: Record<string, string> }) =>
+    request<{ columns: string[]; labels: Record<string, string> }>("/settings/reports-table-columns/mine", {
       method: "PUT",
-      body: JSON.stringify({ columns }),
+      body: JSON.stringify(payload),
     }),
   clearReportsTableColumnsMine: () =>
     request<{ ok: boolean }>("/settings/reports-table-columns/mine", { method: "DELETE" }),
   pingMobileClient: (body: MobileClientPingPayload) =>
-    request<{ ok: boolean }>("/mobile/clients/ping", { method: "POST", body: JSON.stringify(body) }),
+    request<{ ok: boolean }>("/mobile/clients/ping", {
+      method: "POST",
+      body: JSON.stringify({ ...body, deviceId: body.device_id }),
+    }),
   listMobileClients: () => request<MobileClientRow[]>("/settings/mobile-clients"),
   deleteMobileClientRow: (id: number) =>
     request<{ ok: boolean }>(`/settings/mobile-clients/${id}`, { method: "DELETE" }),
@@ -1467,8 +1900,11 @@ export const api = {
       request<SupplyTicketMessageItem>(`/supply-tickets/${ticketId}/messages`, { method: "POST", body: JSON.stringify({ message }) }),
   },
   training: {
-    list: () => request<TrainingArticleItem[]>("/training/articles"),
+    list: () => request<TrainingArticleListItem[]>("/training/articles"),
     get: (id: number) => request<TrainingArticleItem>(`/training/articles/${id}`),
+    recordView: (id: number) => request<void>(`/training/articles/${id}/view`, { method: "POST" }),
+    articleReport: (id: number) => request<TrainingArticleViewReportItem[]>(`/training/articles/${id}/report`),
+    articlesAnalytics: () => request<TrainingArticleAnalyticsItem[]>("/training/articles/analytics"),
     create: (d: { title: string; section?: string; preview_image_url?: string | null; content_html: string; is_published?: boolean }) =>
       request<TrainingArticleItem>("/training/articles", { method: "POST", body: JSON.stringify(d) }),
     update: (id: number, d: { title?: string; section?: string; preview_image_url?: string | null; content_html?: string; is_published?: boolean }) =>
@@ -1560,10 +1996,16 @@ export const api = {
   getOrder: (id: number) => request<OrderItem>(`/orders/${id}`),
   acceptOrder: (id: number) => request<OrderItem>(`/orders/${id}/accept`, { method: "PATCH" }),
   reports: {
-    list: () =>
-      request<ReportItem[]>("/reports"),
+    list: (params?: { dateFrom?: string; dateTo?: string }) => {
+      const sp = new URLSearchParams();
+      if (params?.dateFrom) sp.set("date_from", params.dateFrom);
+      if (params?.dateTo) sp.set("date_to", params.dateTo);
+      const qs = sp.toString();
+      return request<ReportItem[]>(`/reports${qs ? `?${qs}` : ""}`);
+    },
     create: (d: {
       warehouse_id?: number;
+      comment?: string | null;
       utro?: number;
       revenue?: number;
       nal?: number;
@@ -1580,6 +2022,7 @@ export const api = {
       has_encashment?: boolean;
       encashment_nal?: number;
       encashment_bn?: number;
+      withholding_details?: { withholding_id: number; amount: number }[];
       extra_payments?: { amount: number; order_number: string; consultant_last_name?: string | null }[];
       vyhod?: number;
       percent?: number;
@@ -1589,6 +2032,9 @@ export const api = {
         amount: number;
         taken_reason_id?: number | null;
         taken_source_id?: number | null;
+        taken_reason_name?: string | null;
+        taken_source_name?: string | null;
+        linked_debt_date?: string | null;
         order_percent?: number | null;
         report_month?: string | null;
         warehouse_id: number | null;
@@ -1606,7 +2052,7 @@ export const api = {
         debt_row_uid?: string | null;
       }[];
       has_expenses?: boolean;
-      expenses?: { amount: number; expense_article_id: number }[];
+      expenses?: { amount: number; expense_article_id: number; taken_source_id?: number | null }[];
       z_report_urls?: string[];
       card_reconciliation_urls?: string[];
     }) => request<{ id: number }>("/reports", { method: "POST", body: JSON.stringify(d) }),
@@ -1615,6 +2061,7 @@ export const api = {
       id: number,
       d: {
         warehouse_id?: number;
+        comment?: string | null;
         utro?: number;
         revenue?: number;
         nal?: number;
@@ -1630,6 +2077,7 @@ export const api = {
         has_encashment?: boolean;
         encashment_nal?: number;
         encashment_bn?: number;
+        withholding_details?: { withholding_id: number; amount: number }[];
         extra_payments?: { amount: number; order_number: string; consultant_last_name?: string | null }[];
         vyhod?: number;
         percent?: number;
@@ -1639,6 +2087,9 @@ export const api = {
           amount: number;
           taken_reason_id?: number | null;
           taken_source_id?: number | null;
+          taken_reason_name?: string | null;
+          taken_source_name?: string | null;
+          linked_debt_date?: string | null;
           order_percent?: number | null;
           report_month?: string | null;
           warehouse_id: number | null;
@@ -1656,7 +2107,7 @@ export const api = {
           debt_row_uid?: string | null;
         }[];
         has_expenses?: boolean;
-        expenses?: { amount: number; expense_article_id: number }[];
+        expenses?: { amount: number; expense_article_id: number; taken_source_id?: number | null }[];
         z_report_urls?: string[];
         card_reconciliation_urls?: string[];
         /** ISO 8601; только при редактировании отчёта администратором */
@@ -1676,6 +2127,11 @@ export const api = {
       if (params?.excludeReportId != null) sp.set("exclude_report_id", String(params.excludeReportId));
       return request<{ rows: AvailableDebtRow[] }>(`/reports/debts/available${sp.toString() ? `?${sp.toString()}` : ""}`);
     },
+    employeeSalaryBalance: (params: { userId: number; excludeReportId?: number }) => {
+      const sp = new URLSearchParams({ user_id: String(params.userId) });
+      if (params.excludeReportId != null) sp.set("exclude_report_id", String(params.excludeReportId));
+      return request<EmployeeSalaryBalanceResponse>(`/reports/employee-salary-balance?${sp.toString()}`);
+    },
     debtsSummary: () => request<{ rows: DebtSummaryRow[] }>("/reports/debts/summary"),
     /** Сводка по долгам только для текущего пользователя (консультант). */
     debtsMySummary: () => request<{ rows: DebtSummaryRow[] }>("/reports/debts/my-summary"),
@@ -1691,6 +2147,25 @@ export const api = {
       reason?: string | null;
       note?: string | null;
     }) => request<ManualWithholdingRow>("/reports/withholding/manual", { method: "POST", body: JSON.stringify(d) }),
+    updateWithholding: (
+      id: number,
+      d: {
+        user_id?: number | null;
+        amount?: number | null;
+        warehouse_id?: number | null;
+        report_month?: string | null;
+        reason?: string | null;
+        note?: string | null;
+      }
+    ) =>
+      request<ManualWithholdingRow>(`/reports/withholding/manual/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(d),
+      }),
+    closeWithholding: (id: number) =>
+      request<ManualWithholdingRow>(`/reports/withholding/manual/${id}/close`, { method: "POST" }),
+    reopenWithholding: (id: number) =>
+      request<ManualWithholdingRow>(`/reports/withholding/manual/${id}/reopen`, { method: "POST" }),
     deleteWithholding: (id: number) => request<void>(`/reports/withholding/manual/${id}`, { method: "DELETE" }),
     employeeLedger: (userId: number) =>
       request<EmployeeLedgerResponse>(`/reports/debts/employee-ledger?user_id=${encodeURIComponent(String(userId))}`),
@@ -1717,6 +2192,39 @@ export const api = {
       }>("/reports/debts/manual", { method: "POST", body: JSON.stringify(d) }),
     deleteManualDebt: (id: number) => request(`/reports/debts/manual/${id}`, { method: "DELETE" }),
     deleteOneCDebtLog: (id: number) => request(`/reports/debts/one-c/${id}`, { method: "DELETE" }),
+    deleteOneCDebtItem: (debtRowUid: string) =>
+      request(`/reports/debts/one-c-item?debt_row_uid=${encodeURIComponent(debtRowUid)}`, { method: "DELETE" }),
+    /** Корректировка строки долга 1С; при сумме 0 и отсутствии зачётов — удаление (204). */
+    updateOneCDebtItem: (
+      debtRowUid: string,
+      d: {
+        amount?: number;
+        warehouse_id?: number | null;
+        report_month?: string | null;
+        order_number?: string;
+        note?: string | null;
+      }
+    ) =>
+      request<{
+        debt_row_uid: string;
+        amount: number;
+        order_number?: string;
+        note?: string | null;
+        report_month?: string | null;
+        trade_point?: string | null;
+      } | void>(`/reports/debts/one-c-item?debt_row_uid=${encodeURIComponent(debtRowUid)}`, {
+        method: "PATCH",
+        body: JSON.stringify(d),
+      }),
+    /** Погасить полностью долг 1С: сумма = зачтённому; без зачётов — удаление строки (204). */
+    settleOneCDebtItem: (debtRowUid: string) =>
+      request<void>(`/reports/debts/one-c-item/settle?debt_row_uid=${encodeURIComponent(debtRowUid)}`, {
+        method: "POST",
+      }),
+    closeReportDebtItem: (debtRowUid: string) =>
+      request<void>(`/reports/debts/report-item/close?debt_row_uid=${encodeURIComponent(debtRowUid)}`, {
+        method: "POST",
+      }),
     /** Корректировка ручной записи; при сумме 0 и отсутствии зачётов — удаление (204). */
     updateManualDebt: (
       id: number,
@@ -1743,6 +2251,15 @@ export const api = {
       } | void>(`/reports/debts/manual/${id}`, { method: "PATCH", body: JSON.stringify(d) }),
     /** Погасить полностью: сумма = зачтённому; без зачётов — удаление записи (204). */
     settleManualDebt: (id: number) => request<void>(`/reports/debts/manual/${id}/settle`, { method: "POST" }),
+    /** Удержать по ручной записи долга: создаёт открытое удержание (погашается в блоке отчёта). */
+    withholdManualDebt: (
+      id: number,
+      d?: { amount?: number | null; reason?: string | null; note?: string | null }
+    ) =>
+      request<ManualWithholdingRow>(`/reports/debts/manual/${id}/withhold`, {
+        method: "POST",
+        body: JSON.stringify(d ?? {}),
+      }),
     getWarehouseLastOst: (warehouseId: number, opts?: { beforeReportId?: number }) => {
       const sp = new URLSearchParams();
       if (opts?.beforeReportId != null) sp.set("before_report_id", String(opts.beforeReportId));
@@ -1788,15 +2305,34 @@ export const api = {
     list: () => request<CentralCashPayoutItem[]>("/central-cash-payouts"),
     create: (d: { paid_to_user_id: number; amount: number; taken_source_id?: number | null; note?: string | null }) =>
       request<CentralCashPayoutItem>("/central-cash-payouts", { method: "POST", body: JSON.stringify(d) }),
+    update: (
+      id: number,
+      d: {
+        paid_to_user_id?: number | null;
+        amount?: number | null;
+        taken_source_id?: number | null;
+        note?: string | null;
+      }
+    ) =>
+      request<CentralCashPayoutItem>(`/central-cash-payouts/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(d),
+      }),
     delete: (id: number) => request<void>(`/central-cash-payouts/${id}`, { method: "DELETE" }),
   },
   workSchedule: {
-    getPublished: () => request<{ weeks: Record<string, Record<string, string>> }>("/work-schedule/published"),
+    getPublished: () =>
+      request<{ weeks: Record<string, Record<string, string>>; consultant_colors?: Record<string, string> }>(
+        "/work-schedule/published",
+      ),
     publish: (payload: { weeks: Record<string, Record<string, string>> }) =>
-      request<{ weeks: Record<string, Record<string, string>> }>("/work-schedule/publish", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      }),
+      request<{ weeks: Record<string, Record<string, string>>; consultant_colors?: Record<string, string> }>(
+        "/work-schedule/publish",
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        },
+      ),
     deletePublishedWeek: (weekStart: string) =>
       request<void>(`/work-schedule/published/week/${encodeURIComponent(weekStart)}`, { method: "DELETE" }),
     listDrafts: () => request<WorkScheduleDraftItem[]>("/work-schedule/drafts"),
@@ -1914,9 +2450,10 @@ export const api = {
       if (sidebarVideo.url) {
         totalFiles += 1;
         doneFiles += sidebarVideo.saved ? 1 : 0;
-        toDownloadFiles += sidebarVideo.saved ? 1 : 0;
+        if (!sidebarVideo.fromCache && sidebarVideo.saved) toDownloadFiles += 1;
+        downloadedBytes += sidebarVideo.downloadedBytes || 0;
       }
-      notify("PDF каталоги поставщиков");
+      notify("Изображения и PDF поставщиков");
       const baseDone = doneFiles;
       const baseTotal = totalFiles;
       const baseToDownload = toDownloadFiles;
@@ -1926,7 +2463,7 @@ export const api = {
         totalFiles = baseTotal + s.total;
         toDownloadFiles = baseToDownload + s.toDownload;
         downloadedBytes = baseBytes + s.downloadedBytes;
-        notify(`PDF поставщиков: ${s.done}/${s.total}`);
+        notify(`Поставщики (лого и PDF): ${s.done}/${s.total}`);
       });
       notify("Готово");
       return { warehouse, rx, mkl, sidebarVideo, manufacturerPdfs, progress: { doneFiles, totalFiles, toDownloadFiles, downloadedBytes } };
@@ -1939,6 +2476,7 @@ export const api = {
       const manufacturerPdfs = await api.pricelistOffline.syncManufacturerCatalogPdfs();
       return { warehouse, rx, mkl, sidebarVideo, manufacturerPdfs };
     },
+    /** PDF каталогов и логотипов (`image_url`) для страницы «Поставщики» — кладём в IndexedDB офлайн-кэша. */
     syncManufacturerCatalogPdfs: async (
       onProgress?: (p: { done: number; total: number; toDownload: number; downloadedBytes: number }) => void
     ) => {
@@ -1950,9 +2488,14 @@ export const api = {
       const list = await request<ManufacturerItem[]>("/ref/manufacturers");
       const urls = Array.from(
         new Set(
-          (list || [])
-            .map((m) => (m.catalog_pdf_url || "").trim())
-            .filter((u) => !!u)
+          (list || []).flatMap((m) => {
+            const out: string[] = [];
+            const pdf = (m.catalog_pdf_url || "").trim();
+            const img = (m.image_url || "").trim();
+            if (pdf) out.push(pdf);
+            if (img) out.push(img);
+            return out;
+          })
         )
       );
       total = urls.length;
@@ -1981,12 +2524,17 @@ export const api = {
         const cfg = await api.getSidebarVideoSettings();
         const videoUrl = (cfg.video_url || "").trim();
         if (!videoUrl) {
-          return { saved: false, url: null as string | null };
+          return { saved: false, fromCache: false, downloadedBytes: 0, url: null as string | null };
         }
-        const saved = (await cacheAssetUrl(videoUrl)).ok;
-        return { saved, url: videoUrl };
+        const res = await cacheAssetUrl(videoUrl);
+        return {
+          saved: res.ok,
+          fromCache: res.fromCache,
+          downloadedBytes: res.downloadedBytes,
+          url: videoUrl,
+        };
       } catch {
-        return { saved: false, url: null as string | null };
+        return { saved: false, fromCache: false, downloadedBytes: 0, url: null as string | null };
       }
     },
     resolveAssetUrl: async (assetUrl: string) => {
@@ -1997,14 +2545,28 @@ export const api = {
       const cachedPromise = resolveAssetPromiseCache.get(normalized);
       if (cachedPromise) return cachedPromise;
       const resolver = (async () => {
-        const blob = await readCachedAssetBlob(normalized);
-        if (!blob) return assetUrl;
+        let blob = await readCachedAssetBlob(normalized);
+        if (!blob && typeof window !== "undefined" && isNativeAppShell()) {
+          try {
+            const resp = await fetch(normalized, { method: "GET", cache: "no-store" });
+            if (resp.ok) {
+              const b = await resp.blob();
+              if (b && b.size > 0) {
+                await writeCachedAssetBlob(normalized, b);
+                blob = b;
+              }
+            }
+          } catch {
+            /* WebView: прямой <img src> на прод часто даёт ERR_CONNECTION_CLOSED — fetch через шим стабильнее */
+          }
+        }
+        if (!blob) return normalized;
         try {
           const objectUrl = URL.createObjectURL(blob);
           resolvedAssetObjectUrlCache.set(normalized, objectUrl);
           return objectUrl;
         } catch {
-          return assetUrl;
+          return normalized;
         }
       })();
       resolveAssetPromiseCache.set(normalized, resolver);
@@ -2023,7 +2585,9 @@ export const api = {
         name: string;
         organization_id?: number | null;
         manager_id?: number | null;
+        sort_order?: number;
         opening_hours?: WarehouseOpeningHours | null;
+        hide_in_reports?: boolean;
       }) => request<WarehouseItem>("/ref/warehouses", { method: "POST", body: JSON.stringify(d) }),
       update: (
         id: number,
@@ -2031,7 +2595,9 @@ export const api = {
           name?: string;
           organization_id?: number | null;
           manager_id?: number | null;
+          sort_order?: number | null;
           opening_hours?: WarehouseOpeningHours | null;
+          hide_in_reports?: boolean;
         }
       ) => request<WarehouseItem>(`/ref/warehouses/${id}`, { method: "PATCH", body: JSON.stringify(d) }),
       delete: (id: number) => request(`/ref/warehouses/${id}`, { method: "DELETE" }),
@@ -2049,8 +2615,8 @@ export const api = {
     manufacturers: { 
       list: () => request<ManufacturerItem[]>("/ref/manufacturers"), 
       get: (id: number) => request<ManufacturerItem>(`/ref/manufacturers/${id}`),
-      create: (d: { name: string; description?: string; country_id?: number; image_url?: string; catalog_pdf_url?: string; show_in_lens_catalog?: boolean; open_pdf_in_lens_catalog?: boolean; show_country_in_lens_catalog?: boolean; show_description_in_lens_catalog?: boolean }) => request<ManufacturerItem>("/ref/manufacturers", { method: "POST", body: JSON.stringify(d) }),
-      update: (id: number, d: { name?: string; description?: string; country_id?: number; image_url?: string; catalog_pdf_url?: string | null; show_in_lens_catalog?: boolean; open_pdf_in_lens_catalog?: boolean; show_country_in_lens_catalog?: boolean; show_description_in_lens_catalog?: boolean }) => request<ManufacturerItem>(`/ref/manufacturers/${id}`, { method: "PATCH", body: JSON.stringify(d) }), 
+      create: (d: { name: string; description?: string; country_id?: number; image_url?: string; border_color?: string | null; catalog_pdf_url?: string; show_in_lens_catalog?: boolean; open_pdf_in_lens_catalog?: boolean; show_country_in_lens_catalog?: boolean; show_description_in_lens_catalog?: boolean }) => request<ManufacturerItem>("/ref/manufacturers", { method: "POST", body: JSON.stringify(d) }),
+      update: (id: number, d: { name?: string; description?: string; country_id?: number; image_url?: string; border_color?: string | null; catalog_pdf_url?: string | null; show_in_lens_catalog?: boolean; open_pdf_in_lens_catalog?: boolean; show_country_in_lens_catalog?: boolean; show_description_in_lens_catalog?: boolean }) => request<ManufacturerItem>(`/ref/manufacturers/${id}`, { method: "PATCH", body: JSON.stringify(d) }), 
       delete: (id: number) => request(`/ref/manufacturers/${id}`, { method: "DELETE" }) 
     },
     features: { 
@@ -2082,8 +2648,8 @@ export const api = {
     pricelistRxGroups: {
       list: () => request<PricelistGroupItem[]>("/ref/pricelist-rx-groups"),
       get: (id: number) => request<PricelistGroupItem>(`/ref/pricelist-rx-groups/${id}`),
-      create: (d: { name: string; sort_index?: number; display_properties_in_list?: boolean; display_as_tiles?: boolean; tiles_per_page?: number }) => request<PricelistGroupItem>("/ref/pricelist-rx-groups", { method: "POST", body: JSON.stringify(d) }),
-      update: (id: number, d: { name?: string; sort_index?: number; display_properties_in_list?: boolean; display_as_tiles?: boolean; tiles_per_page?: number }) => request<PricelistGroupItem>(`/ref/pricelist-rx-groups/${id}`, { method: "PATCH", body: JSON.stringify(d) }),
+      create: (d: { name: string; sort_index?: number; display_properties_in_list?: boolean; display_as_tiles?: boolean; tiles_per_page?: number; admin_only?: boolean }) => request<PricelistGroupItem>("/ref/pricelist-rx-groups", { method: "POST", body: JSON.stringify(d) }),
+      update: (id: number, d: { name?: string; sort_index?: number; display_properties_in_list?: boolean; display_as_tiles?: boolean; tiles_per_page?: number; admin_only?: boolean }) => request<PricelistGroupItem>(`/ref/pricelist-rx-groups/${id}`, { method: "PATCH", body: JSON.stringify(d) }),
       delete: (id: number) => request(`/ref/pricelist-rx-groups/${id}`, { method: "DELETE" }),
     },
     pricelistMklGroups: {
@@ -2234,13 +2800,15 @@ export const api = {
       const qs = params.toString();
       return request<ChatUserShortResponse[]>(`/chat/users${qs ? `?${qs}` : ""}`);
     },
+    userProfile: (userId: number) => request<ChatUserProfileResponse>(`/chat/users/${userId}/profile`),
     general: {
-      messages: (afterId?: number, limit: number = 50) => {
-        const params = new URLSearchParams();
-        if (afterId != null) params.set("after_id", String(afterId));
-        params.set("limit", String(limit));
-        return request<ChatMessageItem[]>(`/chat/general/messages?${params.toString()}`);
-      },
+      status: () => request<GeneralChatStatus>("/chat/general/status"),
+      messages: (opts?: ChatMessagesQueryOpts) =>
+        request<ChatMessageItem[]>(`/chat/general/messages?${chatMessagesQueryString(opts)}`),
+      sharedMedia: (category: ChatSharedMediaCategory, offset = 0, limit = 60) =>
+        request<ChatSharedMediaResponse>(
+          `/chat/general/shared-media?${chatSharedMediaQueryString(category, offset, limit)}`,
+        ),
       send: (text: string | null, files: File[], replyToMessageId?: number | null) => {
         const fd = new FormData();
         if (text != null) fd.append("text", text);
@@ -2249,21 +2817,39 @@ export const api = {
         if (files.some((f) => (f.name || "").toLowerCase().startsWith("voice-"))) {
           fd.append("is_voice_note", "true");
         }
+        if (files.some((f) => (f.name || "").toLowerCase().startsWith("video-note-"))) {
+          fd.append("is_video_note", "true");
+        }
+        if (files.some((f) => (f.name || "").toLowerCase().startsWith("sticker-"))) {
+          fd.append("is_sticker", "true");
+        }
         return requestMultipart<ChatMessageItem>("/chat/general/messages", fd);
       },
+      createPoll: (data: ChatPollCreatePayload) =>
+        request<ChatMessageItem>("/chat/general/polls", {
+          method: "POST",
+          body: JSON.stringify({
+            question: data.question,
+            options: data.options,
+            allows_multiple: data.allows_multiple,
+            reply_to_message_id: data.reply_to_message_id ?? null,
+          }),
+        }),
       leave: () => request<void>("/chat/general/leave", { method: "POST" }),
       join: () => request<void>("/chat/general/join", { method: "POST" }),
+      markRead: () => request<void>("/chat/general/mark-read", { method: "POST" }),
     },
     privateDialogs: {
       list: () => request<PrivateDialogItem[]>("/chat/private/dialogs"),
       ensure: (userId: number) => request<{ id: number }>(`/chat/private/dialogs/${userId}`, { method: "POST" }),
-      messages: (dialogId: number, afterId?: number, limit: number = 50) =>
-        (() => {
-          const params = new URLSearchParams();
-          if (afterId != null) params.set("after_id", String(afterId));
-          params.set("limit", String(limit));
-          return request<ChatMessageItem[]>(`/chat/private/dialogs/${dialogId}/messages?${params.toString()}`);
-        })(),
+      messages: (dialogId: number, opts?: ChatMessagesQueryOpts) =>
+        request<ChatMessageItem[]>(
+          `/chat/private/dialogs/${dialogId}/messages?${chatMessagesQueryString(opts)}`,
+        ),
+      sharedMedia: (dialogId: number, category: ChatSharedMediaCategory, offset = 0, limit = 60) =>
+        request<ChatSharedMediaResponse>(
+          `/chat/private/dialogs/${dialogId}/shared-media?${chatSharedMediaQueryString(category, offset, limit)}`,
+        ),
       send: (dialogId: number, text: string | null, files: File[], replyToMessageId?: number | null) => {
         const fd = new FormData();
         if (text != null) fd.append("text", text);
@@ -2272,19 +2858,57 @@ export const api = {
         if (files.some((f) => (f.name || "").toLowerCase().startsWith("voice-"))) {
           fd.append("is_voice_note", "true");
         }
+        if (files.some((f) => (f.name || "").toLowerCase().startsWith("video-note-"))) {
+          fd.append("is_video_note", "true");
+        }
+        if (files.some((f) => (f.name || "").toLowerCase().startsWith("sticker-"))) {
+          fd.append("is_sticker", "true");
+        }
         return requestMultipart<ChatMessageItem>(`/chat/private/dialogs/${dialogId}/messages`, fd);
       },
+      createPoll: (dialogId: number, data: ChatPollCreatePayload) =>
+        request<ChatMessageItem>(`/chat/private/dialogs/${dialogId}/polls`, {
+          method: "POST",
+          body: JSON.stringify({
+            question: data.question,
+            options: data.options,
+            allows_multiple: data.allows_multiple,
+            reply_to_message_id: data.reply_to_message_id ?? null,
+          }),
+        }),
       /** Убрать личный чат из списка у текущего пользователя (у собеседника остаётся). */
       delete: (dialogId: number) => request<void>(`/chat/private/dialogs/${dialogId}`, { method: "DELETE" }),
+      markRead: (dialogId: number) =>
+        request<void>(`/chat/private/dialogs/${dialogId}/mark-read`, { method: "POST" }),
     },
     groupDialogs: {
       list: () => request<GroupDialogItem[]>("/chat/group/dialogs"),
-      create: (data: { name: string; image_url?: string | null; member_ids?: number[] }) =>
+      create: (data: {
+        name: string;
+        image_url?: string | null;
+        member_ids?: number[];
+        forbid_exit?: boolean;
+        is_channel?: boolean;
+        members_see_own_only?: boolean;
+      }) =>
         request<GroupDialogItem>("/chat/group/dialogs", {
           method: "POST",
-          body: JSON.stringify({ name: data.name, image_url: data.image_url ?? null, member_ids: data.member_ids ?? [] }),
+          body: JSON.stringify({
+            name: data.name,
+            image_url: data.image_url ?? null,
+            member_ids: data.member_ids ?? [],
+            forbid_exit: data.forbid_exit ?? false,
+            is_channel: data.is_channel ?? false,
+            members_see_own_only: data.members_see_own_only ?? false,
+          }),
         }),
-      update: (dialogId: number, data: { name?: string; image_url?: string | null }) =>
+      update: (dialogId: number, data: {
+        name?: string;
+        image_url?: string | null;
+        forbid_exit?: boolean;
+        is_channel?: boolean;
+        members_see_own_only?: boolean;
+      }) =>
         request<GroupDialogItem>(`/chat/group/dialogs/${dialogId}`, {
           method: "PATCH",
           body: JSON.stringify(data),
@@ -2297,23 +2921,67 @@ export const api = {
       delete: (dialogId: number) =>
         request<void>(`/chat/group/dialogs/${dialogId}`, { method: "DELETE" }),
       members: (dialogId: number) => request<GroupMemberItem[]>(`/chat/group/dialogs/${dialogId}/members`),
-      messages: (dialogId: number, afterId?: number, limit: number = 50) => {
-        const params = new URLSearchParams();
-        if (afterId != null) params.set("after_id", String(afterId));
-        params.set("limit", String(limit));
-        return request<ChatMessageItem[]>(`/chat/group/dialogs/${dialogId}/messages?${params.toString()}`);
-      },
-      send: (dialogId: number, text: string | null, files: File[], replyToMessageId?: number | null) => {
+      patchNotificationSettings: (dialogId: number, data: { enabled: boolean }) =>
+        request<GroupDialogItem>(`/chat/group/dialogs/${dialogId}/notifications`, {
+          method: "PATCH",
+          body: JSON.stringify(data),
+        }),
+      markRead: (dialogId: number) =>
+        request<void>(`/chat/group/dialogs/${dialogId}/mark-read`, { method: "POST" }),
+      messages: (dialogId: number, opts?: ChatMessagesQueryOpts) =>
+        request<ChatMessageItem[]>(
+          `/chat/group/dialogs/${dialogId}/messages?${chatMessagesQueryString(opts)}`,
+        ),
+      sharedMedia: (dialogId: number, category: ChatSharedMediaCategory, offset = 0, limit = 60) =>
+        request<ChatSharedMediaResponse>(
+          `/chat/group/dialogs/${dialogId}/shared-media?${chatSharedMediaQueryString(category, offset, limit)}`,
+        ),
+      send: (
+        dialogId: number,
+        text: string | null,
+        files: File[],
+        replyToMessageId?: number | null,
+        ackRequired?: boolean,
+      ) => {
         const fd = new FormData();
         if (text != null) fd.append("text", text);
         if (replyToMessageId != null) fd.append("reply_to_message_id", String(replyToMessageId));
+        if (ackRequired) fd.append("ack_required", "true");
         files.forEach((f) => fd.append("files", f));
         if (files.some((f) => (f.name || "").toLowerCase().startsWith("voice-"))) {
           fd.append("is_voice_note", "true");
         }
+        if (files.some((f) => (f.name || "").toLowerCase().startsWith("video-note-"))) {
+          fd.append("is_video_note", "true");
+        }
+        if (files.some((f) => (f.name || "").toLowerCase().startsWith("sticker-"))) {
+          fd.append("is_sticker", "true");
+        }
         return requestMultipart<ChatMessageItem>(`/chat/group/dialogs/${dialogId}/messages`, fd);
       },
+      createPoll: (dialogId: number, data: ChatPollCreatePayload) =>
+        request<ChatMessageItem>(`/chat/group/dialogs/${dialogId}/polls`, {
+          method: "POST",
+          body: JSON.stringify({
+            question: data.question,
+            options: data.options,
+            allows_multiple: data.allows_multiple,
+            reply_to_message_id: data.reply_to_message_id ?? null,
+          }),
+        }),
     },
+    votePoll: (messageId: number, optionIds: number[]) =>
+      request<ChatPoll>(`/chat/messages/${messageId}/poll/vote`, {
+        method: "POST",
+        body: JSON.stringify({ option_ids: optionIds }),
+      }),
+    setMessageReaction: (messageId: number, emoji: string) =>
+      request<ChatMessageItem>(`/chat/messages/${messageId}/reactions`, {
+        method: "PUT",
+        body: JSON.stringify({ emoji }),
+      }),
+    messageReactionUsers: (messageId: number, emoji: string) =>
+      request<ChatUserShortResponse[]>(`/chat/messages/${messageId}/reactions/users?emoji=${encodeURIComponent(emoji)}`),
     editMessage: (messageId: number, text: string | null) =>
       request<ChatMessageItem>(`/chat/messages/${messageId}`, { method: "PATCH", body: JSON.stringify({ text }) }),
     forwardMessage: (messageId: number, data: { target_chat_type: "general" | "private" | "group"; target_dialog_id?: number | null }) =>
@@ -2322,6 +2990,12 @@ export const api = {
         body: JSON.stringify({ target_chat_type: data.target_chat_type, target_dialog_id: data.target_dialog_id ?? null }),
       }),
     deleteMessage: (messageId: number) => request<void>(`/chat/messages/${messageId}`, { method: "DELETE" }),
+    messageReads: (messageId: number) =>
+      request<ChatMessageReadsResponse>(`/chat/messages/${messageId}/reads`),
+    messageAcknowledge: (messageId: number) =>
+      request<void>(`/chat/messages/${messageId}/acknowledge`, { method: "POST" }),
+    messageAcknowledgments: (messageId: number) =>
+      request<ChatMessageReadsResponse>(`/chat/messages/${messageId}/acknowledgments`),
     markMessagesRead: (messageIds: number[]) =>
       request<void>("/chat/messages/mark-read", { method: "POST", body: JSON.stringify(messageIds) }),
     markAllMessagesRead: () =>
@@ -2333,12 +3007,103 @@ export const api = {
         method: "PATCH",
         body: JSON.stringify({ enabled: d.enabled }),
       }),
+    wallpapers: () => request<ChatWallpaperItem[]>("/chat/wallpapers"),
+    wallpaperSettings: () => request<ChatWallpaperSettings>("/chat/wallpaper/settings"),
+    patchWallpaperSettings: (d: { wallpaper_id?: number | null; wallpaper_url?: string | null; reset?: boolean }) =>
+      request<ChatWallpaperSettings>("/chat/wallpaper/settings", {
+        method: "PATCH",
+        body: JSON.stringify(d),
+      }),
+    createWallpaperLibraryItem: (title: string, file: File) => {
+      const fd = new FormData();
+      fd.append("title", title);
+      fd.append("file", file);
+      return requestMultipart<ChatWallpaperItem>("/chat/wallpapers", fd);
+    },
     webpushPublicKey: () => request<{ public_key: string }>("/chat/webpush/public-key"),
     webpushSubscribe: (d: { endpoint: string; p256dh: string; auth: string; platform?: string }) =>
       request<void>("/chat/webpush/subscribe", { method: "POST", body: JSON.stringify(d) }),
     webpushUnsubscribe: (endpoint: string) => {
       const sp = new URLSearchParams({ endpoint });
       return request<void>(`/chat/webpush/subscribe?${sp.toString()}`, { method: "DELETE" });
+    },
+    search: (q: string, limit = 40) => {
+      const params = new URLSearchParams({ q: q.trim(), limit: String(limit) });
+      return request<ChatSearchResponse>(`/chat/search?${params.toString()}`);
+    },
+    bot: {
+      threads: () => request<ChatBotThreadItem[]>("/chat/bot/threads"),
+      closeThread: (threadUserId: number) =>
+        request<void>(`/chat/bot/threads/${threadUserId}/close`, { method: "POST" }),
+      messages: (threadUserId: number | undefined, opts?: ChatMessagesQueryOpts) => {
+        const params = new URLSearchParams(chatMessagesQueryString(opts));
+        if (threadUserId != null && threadUserId > 0) {
+          params.set("thread_user_id", String(threadUserId));
+        }
+        const qs = params.toString();
+        return request<ChatMessageItem[]>(`/chat/bot/messages${qs ? `?${qs}` : ""}`);
+      },
+      send: (
+        text: string | null,
+        files: File[],
+        opts?: { threadUserId?: number; replyToMessageId?: number | null },
+      ) => {
+        const fd = new FormData();
+        if (text != null) fd.append("text", text);
+        if (opts?.replyToMessageId != null) fd.append("reply_to_message_id", String(opts.replyToMessageId));
+        if (opts?.threadUserId != null && opts.threadUserId > 0) {
+          fd.append("thread_user_id", String(opts.threadUserId));
+        }
+        files.forEach((f) => fd.append("files", f));
+        if (files.some((f) => (f.name || "").toLowerCase().startsWith("voice-"))) {
+          fd.append("is_voice_note", "true");
+        }
+        if (files.some((f) => (f.name || "").toLowerCase().startsWith("video-note-"))) {
+          fd.append("is_video_note", "true");
+        }
+        if (files.some((f) => (f.name || "").toLowerCase().startsWith("sticker-"))) {
+          fd.append("is_sticker", "true");
+        }
+        return requestMultipart<ChatMessageItem>("/chat/bot/messages", fd);
+      },
+      markRead: (threadUserId?: number) => {
+        const q =
+          threadUserId != null && threadUserId > 0 ? `?thread_user_id=${encodeURIComponent(String(threadUserId))}` : "";
+        return request<void>(`/chat/bot/mark-read${q}`, { method: "POST" });
+      },
+    },
+    gigachat: {
+      messages: (opts?: ChatMessagesQueryOpts) =>
+        request<ChatMessageItem[]>(`/chat/gigachat/messages?${chatMessagesQueryString(opts)}`),
+      send: (d: { text: string; mode?: "chat" | "edit"; context_text?: string | null; context_url?: string | null }) =>
+        request<ChatMessageItem>("/chat/gigachat/messages", {
+          method: "POST",
+          body: JSON.stringify({
+            text: d.text,
+            mode: d.mode ?? "chat",
+            context_text: d.context_text ?? null,
+            context_url: d.context_url ?? null,
+          }),
+        }),
+      markRead: () => request<void>("/chat/gigachat/mark-read", { method: "POST" }),
+    },
+    folders: {
+      list: () => request<ChatFolder[]>("/chat/folders"),
+      create: (name: string) =>
+        request<ChatFolder>("/chat/folders", { method: "POST", body: JSON.stringify({ name }) }),
+      update: (folderId: number, data: { name?: string; position?: number }) =>
+        request<ChatFolder>(`/chat/folders/${folderId}`, { method: "PATCH", body: JSON.stringify(data) }),
+      delete: (folderId: number) => request<void>(`/chat/folders/${folderId}`, { method: "DELETE" }),
+      addItem: (
+        folderId: number,
+        data: { chat_type: "private" | "group"; private_dialog_id?: number | null; group_dialog_id?: number | null },
+      ) =>
+        request<ChatFolderItem>(`/chat/folders/${folderId}/items`, {
+          method: "POST",
+          body: JSON.stringify(data),
+        }),
+      removeItem: (folderId: number, itemId: number) =>
+        request<void>(`/chat/folders/${folderId}/items/${itemId}`, { method: "DELETE" }),
     },
   },
 };

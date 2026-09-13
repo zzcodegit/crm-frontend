@@ -1,5 +1,4 @@
 import { useState, useEffect, useMemo } from "react";
-import { createPortal } from "react-dom";
 import { Link, useParams, useLocation } from "react-router-dom";
 import { pricelistBasePathFromPathname } from "../utils/pricelistRoutes";
 import { formatPricelistPriceRub } from "../utils/pricelistPrice";
@@ -14,6 +13,16 @@ import { api } from "../api";
 import { useAuth } from "../contexts/AuthContext";
 import type { PricelistItemResponse, FeatureItem, CustomFieldItem } from "../api";
 import { isNativeAppShell } from "../utils/nativeApp";
+import {
+  type MklLensColumnKey,
+  type PricelistLensCatalog,
+  effectiveLensColumnLabel,
+  isMklLensColumnVisible,
+  mklLensUiFromCustomValues,
+  pricelistLensUiFromCustomValues,
+  PRICELIST_LENS_COLUMN_KEYS,
+} from "../utils/mklLensParamsUi";
+import { ReportImageLightbox } from "./reportsShared";
 
 /** Цвета для особенностей (фотохром и др.) — справочник из settings/references/features */
 const COLOR_NAME_TO_HEX: Record<string, string> = {
@@ -66,9 +75,11 @@ function FieldRow({ label, value, mono }: { label: string; value: React.ReactNod
 
 /** Как в форме редактирования: значения через запятую выравниваются по строкам таблицы. */
 function strToRows(s: string | null | undefined): string[] {
-  if (!s || !s.trim()) return [""];
-  const parts = s.split(/,\s*/).map((x) => x.trim()).filter(Boolean);
-  return parts.length ? parts : [""];
+  if (s == null) return [""];
+  const raw = String(s);
+  if (!raw.trim()) return [""];
+  const parts = raw.trim().split(/,\s*/).map((x) => x.trim());
+  return parts.length > 0 ? parts : [""];
 }
 
 function zipLensParamRows(
@@ -95,6 +106,8 @@ function zipLensParamRows(
     baseCurve: F[i] ?? "",
   }));
 }
+
+const MKL_DETAIL_COLUMN_ORDER: MklLensColumnKey[] = ["sph", "cyl", "step", "diameters", "replacement", "baseCurve"];
 
 export default function PricelistDetail() {
   const { id } = useParams<{ id: string }>();
@@ -173,18 +186,6 @@ export default function PricelistDetail() {
     if (!item) return false;
     return item.hide_photo !== true;
   }, [item]);
-
-  const photosLength = photosForCard.length;
-  useEffect(() => {
-    if (!lightboxOpen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setLightboxOpen(false);
-      if (e.key === "ArrowLeft") setLightboxIndex((i) => (i <= 0 ? Math.max(0, photosLength - 1) : i - 1));
-      if (e.key === "ArrowRight") setLightboxIndex((i) => (i >= photosLength - 1 ? 0 : i + 1));
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [lightboxOpen, photosLength]);
 
   useEffect(() => {
     if (!id) return;
@@ -282,8 +283,6 @@ export default function PricelistDetail() {
     setLightboxOpen(true);
   };
   const closeLightbox = () => setLightboxOpen(false);
-  const goPrev = () => setLightboxIndex((i) => (i <= 0 ? photosForCard.length - 1 : i - 1));
-  const goNext = () => setLightboxIndex((i) => (i >= photosForCard.length - 1 ? 0 : i + 1));
 
   return (
     <div className="w-full max-w-none animate-slide-in pb-12">
@@ -313,57 +312,8 @@ export default function PricelistDetail() {
         )}
       </div>
 
-      {/* Попап галереи — рендер в body, чтобы перекрывать хедер и сайдбар */}
-      {lightboxOpen && photosForCard.length > 0 && createPortal(
-        <div
-          className="fixed inset-0 flex items-center justify-center"
-          style={{ backgroundColor: "rgba(0,0,0,0.9)", zIndex: 9999 }}
-          onClick={closeLightbox}
-          role="dialog"
-          aria-modal="true"
-          aria-label="Галерея фото"
-        >
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); closeLightbox(); }}
-            className="absolute top-4 right-4 z-10 w-10 h-10 rounded-full flex items-center justify-center text-white hover:bg-white/20 transition-colors"
-            aria-label="Закрыть"
-          >
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-          </button>
-          {photosForCard.length > 1 && (
-            <>
-              <button
-                type="button"
-                onClick={(e) => { e.stopPropagation(); goPrev(); }}
-                className="absolute left-4 top-1/2 -translate-y-1/2 z-10 w-12 h-12 rounded-full flex items-center justify-center text-white hover:bg-white/20 transition-colors"
-                aria-label="Предыдущее"
-              >
-                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
-              </button>
-              <button
-                type="button"
-                onClick={(e) => { e.stopPropagation(); goNext(); }}
-                className="absolute right-4 top-1/2 -translate-y-1/2 z-10 w-12 h-12 rounded-full flex items-center justify-center text-white hover:bg-white/20 transition-colors"
-                aria-label="Следующее"
-              >
-                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
-              </button>
-            </>
-          )}
-          <img
-            src={photosForCard[lightboxIndex]}
-            alt={`${item.lens_name} — фото ${lightboxIndex + 1}`}
-            className="max-w-[90vw] max-h-[85vh] w-auto h-auto object-contain"
-            onClick={(e) => e.stopPropagation()}
-          />
-          {photosForCard.length > 1 && (
-            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-2 text-white text-sm">
-              {lightboxIndex + 1} / {photosForCard.length}
-            </div>
-          )}
-        </div>,
-        document.body
+      {lightboxOpen && photos.length > 0 && (
+        <ReportImageLightbox gallery={{ urls: photos, index: lightboxIndex }} onClose={closeLightbox} />
       )}
 
       {/* Основная карточка: слева фото на весь блок, справа данные */}
@@ -490,89 +440,97 @@ export default function PricelistDetail() {
                 ))}
               </div>
             )}
-            {(item.sph?.trim() ||
-              item.cyl?.trim() ||
-              item.step?.trim() ||
-              item.diameters?.trim() ||
-              (catalog === "mkl" && (item.material?.trim() || item.coefficient?.trim()))) && (
-              <div className="mt-5 pt-5" style={{ borderTop: "1px solid var(--border)" }}>
-                <div className="text-xs font-semibold uppercase tracking-wider mb-3" style={{ color: "var(--text-tertiary)" }}>
-                  Параметры линзы
-                </div>
-                <div className="overflow-x-auto -mx-1 px-1">
-                  <table
-                    className="w-full min-w-[min(100%,36rem)] text-sm border-collapse rounded-xl overflow-hidden"
-                    style={{ border: "1px solid var(--border)" }}
-                  >
-                    <thead>
-                      <tr style={{ background: "var(--bg-secondary)" }}>
-                        <th className="text-left px-3 py-2 font-semibold border-b" style={{ color: "var(--text-secondary)", borderColor: "var(--border)" }}
-                        >
-                          SPH
-                        </th>
-                        <th className="text-left px-3 py-2 font-semibold border-b" style={{ color: "var(--text-secondary)", borderColor: "var(--border)" }}
-                        >
-                          CYL
-                        </th>
-                        <th className="text-left px-3 py-2 font-semibold border-b" style={{ color: "var(--text-secondary)", borderColor: "var(--border)" }}
-                        >
-                          Шаг
-                        </th>
-                        <th className="text-left px-3 py-2 font-semibold border-b" style={{ color: "var(--text-secondary)", borderColor: "var(--border)" }}
-                        >
-                          {catalog === "mkl" ? "Матриал/Влаг" : "Ø"}
-                        </th>
-                        {catalog === "mkl" ? (
-                          <>
-                            <th className="text-left px-3 py-2 font-semibold border-b" style={{ color: "var(--text-secondary)", borderColor: "var(--border)" }}>
-                              Режим замены
+            {(() => {
+              const hasLensData = Boolean(
+                item.sph?.trim() ||
+                  item.cyl?.trim() ||
+                  item.step?.trim() ||
+                  item.diameters?.trim() ||
+                  (catalog === "mkl" && (item.material?.trim() || item.coefficient?.trim()))
+              );
+              const lensCatalog = catalog as PricelistLensCatalog;
+              const lensUi =
+                catalog === "mkl"
+                  ? mklLensUiFromCustomValues(item.custom_values ?? undefined)
+                  : pricelistLensUiFromCustomValues(item.custom_values ?? undefined);
+              const detailColumnOrder =
+                catalog === "mkl" ? MKL_DETAIL_COLUMN_ORDER : [...PRICELIST_LENS_COLUMN_KEYS];
+              const detailKeys = detailColumnOrder.filter((k) => isMklLensColumnVisible(lensUi, "detail", k));
+              if (!hasLensData || detailKeys.length === 0) return null;
+              type ZippedLensRow = {
+                sph: string;
+                cyl: string;
+                step: string;
+                diameters: string;
+                replacementMode: string;
+                baseCurve: string;
+              };
+              const mklCell = (r: ZippedLensRow, key: MklLensColumnKey) => {
+                const v =
+                  key === "sph"
+                    ? r.sph
+                    : key === "cyl"
+                      ? r.cyl
+                      : key === "step"
+                        ? r.step
+                        : key === "diameters"
+                          ? r.diameters
+                          : key === "replacement"
+                            ? r.replacementMode
+                            : r.baseCurve;
+                return v.trim() || "\u00a0";
+              };
+              const zipped = zipLensParamRows(
+                item.sph,
+                item.cyl,
+                item.step,
+                item.diameters,
+                catalog === "mkl" ? item.material : undefined,
+                catalog === "mkl" ? item.coefficient : undefined
+              );
+              return (
+                <div className="mt-5 pt-5" style={{ borderTop: "1px solid var(--border)" }}>
+                  <div className="text-xs font-semibold uppercase tracking-wider mb-3" style={{ color: "var(--text-tertiary)" }}>
+                    Параметры линзы
+                  </div>
+                  <div className="overflow-x-auto -mx-1 px-1">
+                    <table
+                      className="w-full min-w-[min(100%,36rem)] text-sm border-collapse rounded-xl overflow-hidden"
+                      style={{ border: "1px solid var(--border)" }}
+                    >
+                      <thead>
+                        <tr style={{ background: "var(--bg-secondary)" }}>
+                          {detailKeys.map((key) => (
+                            <th
+                              key={key}
+                              className="text-left px-3 py-2 font-semibold border-b"
+                              style={{ color: "var(--text-secondary)", borderColor: "var(--border)" }}
+                            >
+                              {effectiveLensColumnLabel(lensUi, lensCatalog, key)}
                             </th>
-                            <th className="text-left px-3 py-2 font-semibold border-b" style={{ color: "var(--text-secondary)", borderColor: "var(--border)" }}>
-                              ВС
-                            </th>
-                          </>
-                        ) : null}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {zipLensParamRows(
-                        item.sph,
-                        item.cyl,
-                        item.step,
-                        item.diameters,
-                        catalog === "mkl" ? item.material : undefined,
-                        catalog === "mkl" ? item.coefficient : undefined
-                      ).map((row, i) => (
-                        <tr key={i} style={{ borderBottom: "1px solid var(--border)" }}>
-                          <td className="px-3 py-2 align-top font-mono text-xs sm:text-sm whitespace-pre-wrap break-words" style={{ color: "var(--text-primary)" }}>
-                            {row.sph.trim() || "—"}
-                          </td>
-                          <td className="px-3 py-2 align-top font-mono text-xs sm:text-sm whitespace-pre-wrap break-words" style={{ color: "var(--text-primary)" }}>
-                            {row.cyl.trim() || "—"}
-                          </td>
-                          <td className="px-3 py-2 align-top font-mono text-xs sm:text-sm whitespace-pre-wrap break-words" style={{ color: "var(--text-primary)" }}>
-                            {row.step.trim() || "—"}
-                          </td>
-                          <td className="px-3 py-2 align-top font-mono text-xs sm:text-sm whitespace-pre-wrap break-words" style={{ color: "var(--text-primary)" }}>
-                            {row.diameters.trim() || "—"}
-                          </td>
-                          {catalog === "mkl" ? (
-                            <>
-                              <td className="px-3 py-2 align-top font-mono text-xs sm:text-sm whitespace-pre-wrap break-words" style={{ color: "var(--text-primary)" }}>
-                                {row.replacementMode.trim() || "—"}
-                              </td>
-                              <td className="px-3 py-2 align-top font-mono text-xs sm:text-sm whitespace-pre-wrap break-words" style={{ color: "var(--text-primary)" }}>
-                                {row.baseCurve.trim() || "—"}
-                              </td>
-                            </>
-                          ) : null}
+                          ))}
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {zipped.map((row, i) => (
+                          <tr key={i} style={{ borderBottom: "1px solid var(--border)" }}>
+                            {detailKeys.map((key) => (
+                              <td
+                                key={key}
+                                className="px-3 py-2 align-top font-mono text-xs sm:text-sm whitespace-pre-wrap break-words"
+                                style={{ color: "var(--text-primary)" }}
+                              >
+                                {mklCell(row, key)}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
             <div className="text-2xl font-bold tabular-nums pt-2" style={{ color: item.is_promo ? "var(--error)" : "var(--accent)" }}>{formatPricelistPriceRub(Number(item.price), item.price_from)}</div>
             {item.enable_transposition_calc ? (
               <div className="pt-3">

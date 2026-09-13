@@ -127,6 +127,14 @@ const DriveIcon = (_props: { isActive: boolean }) => (
   </svg>
 );
 
+const InfoIcon = (_props: { isActive: boolean }) => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="10" />
+    <path d="M12 16v-4" />
+    <path d="M12 8h.01" />
+  </svg>
+);
+
 const navItems: { 
   to: string; 
   label: string; 
@@ -144,8 +152,9 @@ const navItems: {
   { to: "/pricelist", label: "Прайс склад", icon: PricelistIcon, color: "#0066cc", end: true, subItemsKey: "pricelist", sectionKey: "pricelist" },
   { to: "/pricelist-rx", label: "RX", icon: PricelistIcon, color: "#0066cc", end: true, subItemsKey: "pricelist", sectionKey: "pricelistRx" },
   { to: "/pricelist-mkl", label: "Прайс МКЛ", icon: PricelistIcon, color: "#0066cc", end: true, subItemsKey: "pricelist", sectionKey: "pricelistMkl" },
+  { to: "/info", label: "Информация", icon: InfoIcon, color: "#0066cc", end: true, sectionKey: "info" },
   { to: "/reports", label: "Отчеты", icon: ReportsIcon, color: "#0066cc", end: true, sectionKey: "reports" },
-  { to: "/schedule-management", label: "График работ", icon: ScheduleIcon, color: "#0066cc", end: true, adminOnly: true },
+  { to: "/schedule-management", label: "График работ", icon: ScheduleIcon, color: "#0066cc", end: true, sectionKey: "scheduleManagement" },
   { to: "/chat", label: "Чат", icon: ChatIcon, color: "#0066cc", end: true, sectionKey: "chat" },
   { to: "/supply-tickets", label: "Заявки на поставку", icon: TicketIcon, color: "#0066cc", end: true, sectionKey: "supplyTickets" },
   { to: "/tasks", label: "Задачник", icon: TasksKanbanIcon, color: "#0066cc", end: true, sectionKey: "tasks" },
@@ -197,6 +206,21 @@ export default function Sidebar({
   const showChatBadge =
     chatSectionAllowed && user?.chat_notifications_enabled !== false && chatUnread > 0;
   const badgeText = chatUnread > 99 ? "99+" : String(chatUnread);
+
+  const chatUnreadBadge = (
+    <span
+      aria-hidden
+      className="min-w-[18px] h-[18px] px-[4px] rounded-full flex items-center justify-center text-[10px] font-bold leading-none shrink-0"
+      style={{
+        backgroundColor: "#ef4444",
+        color: "#fff",
+        border: "2px solid var(--bg-secondary)",
+        boxShadow: "0 2px 8px rgba(239, 68, 68, 0.4)",
+      }}
+    >
+      {badgeText}
+    </span>
+  );
 
   const openNotificationsFeed = () => {
     if (!chatSectionAllowed) return;
@@ -391,27 +415,15 @@ export default function Sidebar({
     };
   }, [sidebarVideoUrl]);
   const isAdmin = user?.role === "admin" || Boolean(user?.is_admin);
-  const isManagerOnly = user?.role === "manager";
   const bySectionAccess = (item: (typeof navItems)[number]) => !item.sectionKey || isSectionAllowed(item.sectionKey);
-  const groupsByPath = (path: string) =>
-    path === "/pricelist" ? pricelistGroupsWarehouse : path === "/pricelist-rx" ? pricelistGroupsRx : pricelistGroupsMkl;
+  const groupsByPath = (path: string) => {
+    const raw =
+      path === "/pricelist" ? pricelistGroupsWarehouse : path === "/pricelist-rx" ? pricelistGroupsRx : pricelistGroupsMkl;
+    if (path === "/pricelist-rx" && !isAdmin) return raw.filter((g) => !g.admin_only);
+    return raw;
+  };
   const inNativeShell = isNativeAppShell();
-  const itemsRawBase = isManagerOnly
-    ? navItems.filter(
-        (i) =>
-          (i.to === "/orders" ||
-            i.to === "/drive" ||
-            i.to === "/lens-catalog" ||
-            i.to === "/pricelist" ||
-            i.to === "/pricelist-rx" ||
-            i.to === "/pricelist-mkl" ||
-            i.to === "/reports" ||
-            i.to === "/supply-tickets" ||
-            i.to === "/chat" ||
-            i.to === "/settings") &&
-          bySectionAccess(i)
-      )
-    : navItems.filter((i) => (!i.adminOnly || isAdmin) && bySectionAccess(i));
+  const itemsRawBase = navItems.filter((i) => (!i.adminOnly || isAdmin) && bySectionAccess(i));
   const itemsRaw = inNativeShell ? itemsRawBase.filter((i) => NATIVE_SHELL_NAV_PATHS.has(i.to)) : itemsRawBase;
   const sidebarOrderMap = new Map(sidebarMenuOrder.map((to, index) => [to, index]));
   const items = [...itemsRaw].sort((a, b) => {
@@ -421,13 +433,16 @@ export default function Sidebar({
     return DEFAULT_SIDEBAR_MENU_ORDER.indexOf(a.to) - DEFAULT_SIDEBAR_MENU_ORDER.indexOf(b.to);
   });
   const userGroupIds = user?.group_ids ?? [];
+  /** В WebView APK иногда в кэше пользователя нет group_ids — иначе видео пропадает при ограничении «по группам». */
   const canShowSidebarVideo =
-    !inNativeShell &&
     !!sidebarVideoUrl &&
-    sidebarVideoGroupIds.length > 0 &&
-    userGroupIds.some((gid) => sidebarVideoGroupIds.includes(gid));
+    (sidebarVideoGroupIds.length === 0 ||
+      userGroupIds.some((gid) => sidebarVideoGroupIds.includes(gid)) ||
+      (inNativeShell && Boolean(user) && userGroupIds.length === 0 && sidebarVideoGroupIds.length > 0));
   const closed = mobile && !open;
   const narrow = !mobile && collapsed;
+  /** На планшетах APK сайдбар может быть в режиме «узкой полосы» (narrow) — там раньше видео полностью скрывалось. */
+  const showSidebarVideoBlock = canShowSidebarVideo && (!narrow || inNativeShell);
   return (
     <>
       {open && mobile && (
@@ -499,7 +514,14 @@ export default function Sidebar({
                     }
                     onClose?.();
                   }}
-                  className={`flex items-center rounded-lg text-sm transition-all group relative overflow-hidden ${narrow ? "justify-center w-12 h-12 p-0" : "gap-3 px-4 py-3"}`}
+                  className={`flex items-center rounded-lg text-sm transition-all group relative ${item.to === "/chat" && showChatBadge ? "overflow-visible" : "overflow-hidden"} ${narrow ? "justify-center w-12 h-12 p-0" : "gap-3 px-4 py-3"}`}
+                  title={
+                    item.to === "/chat" && showChatBadge
+                      ? `Непрочитанных: ${chatUnread}`
+                      : narrow
+                        ? item.label
+                        : undefined
+                  }
                   style={({ isActive }) => ({
                     backgroundColor: isActive ? 'var(--accent-light)' : 'transparent',
                     color: isActive ? 'var(--accent)' : 'var(--text-primary)',
@@ -524,32 +546,39 @@ export default function Sidebar({
                       target.style.transform = 'translateX(0)';
                     }
                   }}
-                  title={narrow ? item.label : undefined}
                 >
-                  {({ isActive }) => (
+                  {({ isActive }) => {
+                    const chatBadgeOnItem = item.to === "/chat" && showChatBadge;
+                    return (
                     <>
                       <div 
-                        className={`flex items-center justify-center rounded-lg transition-all ${narrow ? "w-10 h-10" : "w-9 h-9"}`}
+                        className={`relative flex items-center justify-center rounded-lg transition-all ${narrow ? "w-10 h-10" : "w-9 h-9"}`}
                         style={{ 
                           backgroundColor: isActive ? 'var(--accent)' : 'var(--bg-secondary)',
                           color: isActive ? '#ffffff' : 'var(--text-secondary)',
                         }}
                       >
                         <item.icon isActive={isActive} />
+                        {chatBadgeOnItem && narrow ? (
+                          <span className="absolute -top-1 -right-1">{chatUnreadBadge}</span>
+                        ) : null}
                       </div>
                       {!narrow && (
                         <>
                           <span className="flex-1">{item.label}</span>
-                          {isActive && (
+                          {chatBadgeOnItem ? (
+                            chatUnreadBadge
+                          ) : isActive ? (
                             <div 
                               className="w-1.5 h-1.5 rounded-full animate-pulse"
                               style={{ backgroundColor: 'var(--accent)' }}
                             />
-                          )}
+                          ) : null}
                         </>
                       )}
                     </>
-                  )}
+                    );
+                  }}
                 </NavLink>
               {/* Подпункты прайса — группы (раздел Прайс склад / RX), с возможностью свернуть */}
               {!narrow &&
@@ -648,8 +677,8 @@ export default function Sidebar({
               )}
             </div>
           ))}
-          {!narrow && canShowSidebarVideo && (
-            <div className="mt-4 px-1">
+          {showSidebarVideoBlock && (
+            <div className={`mt-4 ${narrow && inNativeShell ? "px-0" : "px-1"}`}>
               <div
                 className="rounded-xl overflow-hidden"
                 style={{
@@ -660,7 +689,11 @@ export default function Sidebar({
                 <video
                   src={(resolvedSidebarVideoUrl || sidebarVideoUrl) ?? undefined}
                   className="w-full h-auto object-contain"
-                  style={{ aspectRatio: "9 / 16", maxHeight: "320px", backgroundColor: "#000" }}
+                  style={{
+                    aspectRatio: "9 / 16",
+                    maxHeight: narrow && inNativeShell ? "220px" : "320px",
+                    backgroundColor: "#000",
+                  }}
                   autoPlay
                   loop
                   muted

@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { api, type UserItem, type WarehouseItem, type WorkScheduleDraftItem, type WorkScheduleMyConfirmation } from "../api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { DragEvent } from "react";
+import { api, warehousesVisibleInReports, type UserItem, type WarehouseItem, type WorkScheduleDraftItem, type WorkScheduleMyConfirmation } from "../api";
 import { useAuth } from "../contexts/AuthContext";
 import {
   applyWeeksToLocalStorage,
@@ -9,6 +10,7 @@ import {
   getWeekOverridesFromStorage,
   mondayOfWeekContaining,
 } from "../utils/workScheduleStorage";
+import { scheduleConsultantChipStyle } from "../utils/scheduleColors";
 
 type Mode = "consultant" | "admin";
 
@@ -67,6 +69,7 @@ export default function WorkScheduleBoard({
   const [loading, setLoading] = useState(true);
   const [warehouses, setWarehouses] = useState<WarehouseItem[]>([]);
   const [consultants, setConsultants] = useState<string[]>([]);
+  const [consultantColors, setConsultantColors] = useState<Record<string, string>>({});
   const [baseDate, setBaseDate] = useState(new Date());
   /** null — до первой загрузки списка; "" — пользователь очистил поле сотрудника. */
   const [selectedConsultant, setSelectedConsultant] = useState<string | null>(null);
@@ -92,6 +95,8 @@ export default function WorkScheduleBoard({
   const [confirmErr, setConfirmErr] = useState("");
   const [copyFromWeekDate, setCopyFromWeekDate] = useState("");
   const [addSecondMode, setAddSecondMode] = useState(false);
+  const draggedConsultantRef = useRef<{ consultant: string; point: string; dayKey: string } | null>(null);
+  const [dragOverCell, setDragOverCell] = useState<{ point: string; dayKey: string } | null>(null);
 
   useEffect(() => {
     if (!initialWeekMonday || !/^\d{4}-\d{2}-\d{2}$/.test(initialWeekMonday.trim())) return;
@@ -101,12 +106,16 @@ export default function WorkScheduleBoard({
   }, [initialWeekMonday]);
 
   useEffect(() => {
-    if (mode !== "consultant") return;
     let cancelled = false;
     api.workSchedule
       .getPublished()
       .then((data) => {
-        if (!cancelled) setPublishedWeeks(data.weeks ?? {});
+        if (!cancelled) {
+          setPublishedWeeks(data.weeks ?? {});
+          if (data.consultant_colors && typeof data.consultant_colors === "object") {
+            setConsultantColors(data.consultant_colors);
+          }
+        }
       })
       .catch(() => {
         if (!cancelled) setPublishedWeeks({});
@@ -114,7 +123,7 @@ export default function WorkScheduleBoard({
     return () => {
       cancelled = true;
     };
-  }, [mode]);
+  }, []);
 
   useEffect(() => {
     if (mode !== "admin") return;
@@ -149,7 +158,14 @@ export default function WorkScheduleBoard({
         if (!mounted) return;
         const [warehousesResult, secondResult] = results;
 
-        const loadedWarehouses = warehousesResult.status === "fulfilled" ? warehousesResult.value : [];
+        const loadedWarehouses =
+          warehousesResult.status === "fulfilled" ? warehousesVisibleInReports(warehousesResult.value) : [];
+        loadedWarehouses.sort((a, b) => {
+          const ao = Number.isFinite(a.sort_order as number) ? Number(a.sort_order) : 0;
+          const bo = Number.isFinite(b.sort_order as number) ? Number(b.sort_order) : 0;
+          if (ao !== bo) return ao - bo;
+          return (a.name || "").localeCompare((b.name || ""), "ru");
+        });
         setWarehouses(loadedWarehouses);
 
         let merged: string[] = [];
@@ -158,6 +174,13 @@ export default function WorkScheduleBoard({
           const users = secondResult.status === "fulfilled" ? (secondResult.value as UserItem[]) : [];
           const byUsers = users.map((u) => fioLikeSettingsUsers(u)).map((x) => x.trim()).filter(Boolean);
           merged = [...new Set(byUsers)].sort((a, b) => a.localeCompare(b, "ru"));
+          const colors: Record<string, string> = {};
+          for (const u of users) {
+            const display = fioLikeSettingsUsers(u).trim();
+            const c = (u as UserItem).schedule_color;
+            if (display && c && typeof c === "string") colors[display] = c;
+          }
+          setConsultantColors(colors);
         } else {
           const byReports =
             secondResult.status === "fulfilled"
@@ -186,6 +209,18 @@ export default function WorkScheduleBoard({
 
   const weekDays = useMemo(() => buildMoscowWeekDays(baseDate), [baseDate]);
   const weekStartKey = weekDays[0]?.key ?? "";
+
+  /** Локальные правки или опубликованная неделя с сервера (для «Открыть в редакторе»). */
+  const resolveWeekOverridesForEditor = useCallback(
+    (weekMonday: string): Record<string, string> => {
+      const local = getWeekOverridesFromStorage(weekMonday);
+      if (Object.keys(local).length > 0) return local;
+      const pub = publishedWeeks[weekMonday];
+      if (pub && typeof pub === "object") return { ...pub };
+      return {};
+    },
+    [publishedWeeks]
+  );
 
   useEffect(() => {
     if (mode !== "consultant" || !weekStartKey || !user?.is_consultant) {
@@ -295,18 +330,20 @@ export default function WorkScheduleBoard({
 
   useEffect(() => {
     if (mode !== "admin" || !weekStartKey) return;
-    try {
-      const raw = localStorage.getItem(`work_schedule_overrides_${weekStartKey}`);
-      if (!raw) {
-        setOverrides({});
-        return;
+    const resolved = resolveWeekOverridesForEditor(weekStartKey);
+    if (Object.keys(resolved).length > 0) {
+      setOverrides(resolved);
+      if (Object.keys(getWeekOverridesFromStorage(weekStartKey)).length === 0) {
+        try {
+          localStorage.setItem(`work_schedule_overrides_${weekStartKey}`, JSON.stringify(resolved));
+        } catch {
+          // ignore
+        }
       }
-      const parsed = JSON.parse(raw) as Record<string, string>;
-      setOverrides(parsed && typeof parsed === "object" ? parsed : {});
-    } catch {
-      setOverrides({});
+      return;
     }
-  }, [mode, weekStartKey, reloadKey, draftReloadToken]);
+    setOverrides({});
+  }, [mode, weekStartKey, reloadKey, draftReloadToken, resolveWeekOverridesForEditor]);
 
   useEffect(() => {
     if (mode !== "consultant" || !weekStartKey) return;
@@ -554,15 +591,15 @@ export default function WorkScheduleBoard({
     const d = new Date(weekStartKey + "T12:00:00");
     d.setDate(d.getDate() - 7);
     const prevMonday = d.toISOString().slice(0, 10);
-    const existing = getWeekOverridesFromStorage(prevMonday);
+    const existing = resolveWeekOverridesForEditor(prevMonday);
     if (Object.keys(existing).length === 0) {
       window.alert(
-        "В этом браузере нет сохранённого графика за прошлую неделю. Сначала откройте и заполните прошлую неделю."
+        "Нет графика за прошлую неделю (ни в браузере, ни в опубликованном на сервере)."
       );
       return;
     }
     if (!window.confirm("Заменить график текущей недели копией с прошлой недели?")) return;
-    const mapped = copyWeekScheduleToWeek(prevMonday, weekStartKey);
+    const mapped = copyWeekScheduleToWeek(prevMonday, weekStartKey, existing);
     setOverrides(mapped);
     setDraftReloadToken((k) => k + 1);
   };
@@ -593,9 +630,9 @@ export default function WorkScheduleBoard({
       window.alert("Выберите другую неделю — источник совпадает с текущей.");
       return;
     }
-    const existing = getWeekOverridesFromStorage(sourceMonday);
+    const existing = resolveWeekOverridesForEditor(sourceMonday);
     if (Object.keys(existing).length === 0) {
-      window.alert("Нет сохранённого графика за выбранную неделю в этом браузере.");
+      window.alert("Нет графика за выбранную неделю (ни в браузере, ни в опубликованном на сервере).");
       return;
     }
     if (
@@ -604,7 +641,7 @@ export default function WorkScheduleBoard({
       )
     )
       return;
-    const mapped = copyWeekScheduleToWeek(sourceMonday, weekStartKey);
+    const mapped = copyWeekScheduleToWeek(sourceMonday, weekStartKey, existing);
     setOverrides(mapped);
     setDraftReloadToken((k) => k + 1);
   };
@@ -653,6 +690,117 @@ export default function WorkScheduleBoard({
     if (!targetList.includes(consultant)) targetList.push(consultant);
     next[targetKey] = formatCellConsultants(targetList);
   };
+
+  /** Перенести сотрудника из одной ячейки в другую (другой день и/или точка). */
+  const moveConsultantToCellWithUniqueRule = (
+    next: Record<string, string>,
+    fromPoint: string,
+    fromDayKey: string,
+    toPoint: string,
+    toDayKey: string,
+    consultant: string
+  ) => {
+    if (fromPoint === toPoint && fromDayKey === toDayKey) return;
+    const fromKey = `${fromPoint}|${fromDayKey}`;
+    next[fromKey] = formatCellConsultants(
+      parseCellConsultants(next[fromKey] ?? "—").filter((n) => n !== consultant)
+    );
+    for (const p of points) {
+      const k = `${p}|${toDayKey}`;
+      if (k === `${toPoint}|${toDayKey}`) continue;
+      const list = parseCellConsultants(next[k] ?? "—");
+      const filtered = list.filter((n) => n !== consultant);
+      next[k] = formatCellConsultants(filtered);
+    }
+    const targetKey = `${toPoint}|${toDayKey}`;
+    const targetList = parseCellConsultants(next[targetKey] ?? "—");
+    if (!targetList.includes(consultant)) targetList.push(consultant);
+    next[targetKey] = formatCellConsultants(targetList);
+  };
+
+  const handleConsultantDragStart =
+    (consultant: string, point: string, dayKey: string) => (e: DragEvent) => {
+      if (mode !== "admin") return;
+      draggedConsultantRef.current = { consultant, point, dayKey };
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", consultant);
+    };
+
+  const handleScheduleCellDragOver = (point: string, dayKey: string) => (e: DragEvent) => {
+    if (mode !== "admin" || !draggedConsultantRef.current) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setDragOverCell({ point, dayKey });
+  };
+
+  const handleScheduleCellDragLeave = (point: string, dayKey: string) => () => {
+    setDragOverCell((prev) =>
+      prev?.point === point && prev?.dayKey === dayKey ? null : prev
+    );
+  };
+
+  const handleScheduleCellDrop = (point: string, dayKey: string) => (e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const drag = draggedConsultantRef.current;
+    draggedConsultantRef.current = null;
+    setDragOverCell(null);
+    if (mode !== "admin" || !drag) return;
+    if (drag.point === point && drag.dayKey === dayKey) return;
+    setOverrides((prev) => {
+      const next = { ...prev };
+      moveConsultantToCellWithUniqueRule(next, drag.point, drag.dayKey, point, dayKey, drag.consultant);
+      return next;
+    });
+  };
+
+  const handleConsultantDragEnd = () => {
+    draggedConsultantRef.current = null;
+    setDragOverCell(null);
+  };
+
+  const renderScheduleCellConsultants = (
+    person: string,
+    point: string,
+    dayKey: string,
+    highlight: boolean
+  ) => {
+    const names = parseCellConsultants(person === "—" ? "" : person);
+    if (names.length === 0) return "—";
+    return (
+      <span className="block space-y-0.5 pr-5">
+        {names.map((name) => (
+          <span
+            key={name}
+            draggable={mode === "admin"}
+            onClick={(e) => {
+              if (mode !== "admin") return;
+              // Клик по имени в ячейке — выбрать сотрудника для назначения (без назначения в эту же ячейку).
+              e.stopPropagation();
+              setSelectedConsultant(name);
+              setConsultantSearchText(name);
+              setConsultantDropdownOpen(false);
+            }}
+            onDragStart={(e) => {
+              handleConsultantDragStart(name, point, dayKey)(e);
+              e.stopPropagation();
+            }}
+            onDragEnd={handleConsultantDragEnd}
+            className={`work-schedule-consultant-chip block rounded-md px-1.5 py-0.5 -mx-0.5 max-w-full break-words whitespace-normal ${mode === "admin" ? "cursor-grab active:cursor-grabbing" : ""}`}
+            style={scheduleConsultantChipStyle(name, consultantColors, highlight, activeConsultant)}
+            title={mode === "admin" ? "Перетащите на другой день" : undefined}
+          >
+            {name}
+          </span>
+        ))}
+      </span>
+    );
+  };
+
+  const scheduleCellDropStyle = (point: string, dayKey: string) =>
+    dragOverCell?.point === point && dragOverCell?.dayKey === dayKey
+      ? { outline: "2px dashed var(--accent)", outlineOffset: -2 }
+      : {};
 
   const clearWholeWeek = () => {
     if (mode !== "admin") return;
@@ -713,7 +861,7 @@ export default function WorkScheduleBoard({
 
   return (
     <div
-      className="p-4 sm:p-6 rounded-lg min-w-0"
+      className="work-schedule-board p-4 sm:p-6 rounded-lg min-w-0"
       style={{
         backgroundColor: "var(--bg-primary)",
         border: `1px solid ${worksAtMultiplePoints ? "var(--accent)" : "var(--border)"}`,
@@ -840,6 +988,60 @@ export default function WorkScheduleBoard({
               style={{ background: "#fef2f2", border: "1px solid #fecaca", color: "#b91c1c" }}
             >
               Удалить черновик
+            </button>
+          </div>
+        </div>
+      )}
+
+      {mode === "admin" && weekStartKey && (
+        <div
+          className="mb-4 p-4 rounded-xl border"
+          style={{ borderColor: "var(--border)", background: "var(--bg-secondary)" }}
+        >
+          <div className="text-sm font-semibold mb-1" style={{ color: "var(--text-primary)" }}>
+            Копирование недели
+          </div>
+          <p className="text-xs mb-3 leading-relaxed" style={{ color: "var(--text-tertiary)" }}>
+            Данные хранятся в браузере. Копируется заполненный график: смены сдвигаются на нужную неделю по датам. Удобно перенести типовую неделю на следующую или взять за основу прошлую.
+          </p>
+          <div className="flex flex-wrap gap-2 mb-4">
+            <button
+              type="button"
+              onClick={handleCopyFromPreviousWeek}
+              className="px-3 py-2 rounded-lg text-sm font-medium"
+              style={{ background: "var(--bg-primary)", border: "1px solid var(--border)", color: "var(--text-primary)" }}
+            >
+              Скопировать с прошлой недели
+            </button>
+            <button
+              type="button"
+              onClick={handleCopyToNextWeek}
+              className="px-3 py-2 rounded-lg text-sm font-medium"
+              style={{ background: "var(--bg-primary)", border: "1px solid var(--border)", color: "var(--text-primary)" }}
+            >
+              Скопировать на следующую неделю
+            </button>
+          </div>
+          <div className="flex flex-wrap items-end gap-3">
+            <div>
+              <label className="block text-xs font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
+                Скопировать с другой недели (любой день)
+              </label>
+              <input
+                type="date"
+                value={copyFromWeekDate}
+                onChange={(e) => setCopyFromWeekDate(e.target.value)}
+                className="px-3 py-2 rounded-lg text-sm border outline-none"
+                style={{ background: "var(--bg-primary)", borderColor: "var(--border)", color: "var(--text-primary)" }}
+              />
+            </div>
+            <button
+              type="button"
+              onClick={handleCopyFromSelectedWeek}
+              className="px-3 py-2 rounded-lg text-sm font-medium"
+              style={{ background: "var(--accent)", border: "1px solid var(--accent)", color: "#fff" }}
+            >
+              Скопировать в текущую неделю
             </button>
           </div>
         </div>
@@ -1060,60 +1262,6 @@ export default function WorkScheduleBoard({
         </div>
       )}
 
-      {mode === "admin" && weekStartKey && (
-        <div
-          className="mb-4 p-4 rounded-xl border"
-          style={{ borderColor: "var(--border)", background: "var(--bg-secondary)" }}
-        >
-          <div className="text-sm font-semibold mb-1" style={{ color: "var(--text-primary)" }}>
-            Копирование недели
-          </div>
-          <p className="text-xs mb-3 leading-relaxed" style={{ color: "var(--text-tertiary)" }}>
-            Данные хранятся в браузере. Копируется заполненный график: смены сдвигаются на нужную неделю по датам. Удобно перенести типовую неделю на следующую или взять за основу прошлую.
-          </p>
-          <div className="flex flex-wrap gap-2 mb-4">
-            <button
-              type="button"
-              onClick={handleCopyFromPreviousWeek}
-              className="px-3 py-2 rounded-lg text-sm font-medium"
-              style={{ background: "var(--bg-primary)", border: "1px solid var(--border)", color: "var(--text-primary)" }}
-            >
-              Скопировать с прошлой недели
-            </button>
-            <button
-              type="button"
-              onClick={handleCopyToNextWeek}
-              className="px-3 py-2 rounded-lg text-sm font-medium"
-              style={{ background: "var(--bg-primary)", border: "1px solid var(--border)", color: "var(--text-primary)" }}
-            >
-              Скопировать на следующую неделю
-            </button>
-          </div>
-          <div className="flex flex-wrap items-end gap-3">
-            <div>
-              <label className="block text-xs font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
-                Скопировать с другой недели (любой день)
-              </label>
-              <input
-                type="date"
-                value={copyFromWeekDate}
-                onChange={(e) => setCopyFromWeekDate(e.target.value)}
-                className="px-3 py-2 rounded-lg text-sm border outline-none"
-                style={{ background: "var(--bg-primary)", borderColor: "var(--border)", color: "var(--text-primary)" }}
-              />
-            </div>
-            <button
-              type="button"
-              onClick={handleCopyFromSelectedWeek}
-              className="px-3 py-2 rounded-lg text-sm font-medium"
-              style={{ background: "var(--accent)", border: "1px solid var(--accent)", color: "#fff" }}
-            >
-              Скопировать в текущую неделю
-            </button>
-          </div>
-        </div>
-      )}
-
       {mode === "consultant" && user?.is_consultant && weekStartKey && !consultantNoPublishedWeek && (
         <div
           className="mb-4 p-4 rounded-xl border"
@@ -1169,7 +1317,7 @@ export default function WorkScheduleBoard({
 
       {mode === "admin" && (
         <div className="mb-4 text-[11px] rounded-lg px-1" style={{ color: "var(--text-tertiary)" }}>
-          Обычный клик по ячейке: заменить сотрудника в день/точке. Для добавления второго включите кнопку «Режим: добавить 2-го продавца». Один сотрудник в день не может быть сразу на двух точках.
+          Перетаскивайте имя сотрудника на другой день (в таблице или в блоке «График точки»). Обычный клик по ячейке: назначить выбранного сотрудника. Для добавления второго включите «Режим: добавить 2-го продавца». Один сотрудник в день не может быть сразу на двух точках.
         </div>
       )}
 
@@ -1185,33 +1333,49 @@ export default function WorkScheduleBoard({
                 const person = x.consultant;
                 const names = parseCellConsultants(person === "—" ? "" : person);
                 const highlight = Boolean(activeConsultant) && names.includes(activeConsultant);
+                const dropPoint = summaryPoint || "";
                 return (
-                  <button
+                  <div
                     key={x.dayKey}
-                    type="button"
+                    role="button"
+                    tabIndex={0}
                     onClick={() => summaryPoint && onCellClick(summaryPoint, x.dayKey)}
-                    className="p-2 rounded border text-xs text-left w-full min-w-0 transition-opacity hover:opacity-95"
+                    onKeyDown={(e) => {
+                      if ((e.key === "Enter" || e.key === " ") && summaryPoint) {
+                        e.preventDefault();
+                        onCellClick(summaryPoint, x.dayKey);
+                      }
+                    }}
+                    onDragOver={dropPoint ? handleScheduleCellDragOver(dropPoint, x.dayKey) : undefined}
+                    onDragLeave={dropPoint ? handleScheduleCellDragLeave(dropPoint, x.dayKey) : undefined}
+                    onDrop={dropPoint ? handleScheduleCellDrop(dropPoint, x.dayKey) : undefined}
+                    className="p-2 rounded border text-xs text-left w-full min-w-0 transition-opacity hover:opacity-95 cursor-pointer"
                     style={{
                       borderColor: highlight ? "var(--accent)" : "var(--border)",
                       background: highlight ? "var(--accent-light)" : "var(--bg-primary)",
+                      ...(dropPoint ? scheduleCellDropStyle(dropPoint, x.dayKey) : {}),
                     }}
                   >
                     <div className="min-w-0" style={{ color: "var(--text-secondary)" }}>
                       {x.day}
                     </div>
                     <div
-                      className="font-semibold min-w-0 break-words whitespace-pre-wrap"
+                      className="work-schedule-week-card-value font-semibold min-w-0 break-words whitespace-normal"
                       style={{ color: highlight ? "var(--accent)" : "var(--text-primary)" }}
                     >
-                      {person}
+                      {dropPoint
+                        ? renderScheduleCellConsultants(person, dropPoint, x.dayKey, highlight)
+                        : person}
                     </div>
-                  </button>
+                  </div>
                 );
               })
             : consultantWeek.map((x) => (
-                <div key={x.day} className="p-2 rounded border text-xs" style={{ borderColor: "var(--border)", background: "var(--bg-primary)" }}>
-                  <div style={{ color: "var(--text-secondary)" }}>{x.day}</div>
-                  <div className="font-semibold" style={{ color: "var(--text-primary)" }}>
+                <div key={x.day} className="p-2 rounded border text-xs min-w-0" style={{ borderColor: "var(--border)", background: "var(--bg-primary)" }}>
+                  <div className="break-words" style={{ color: "var(--text-secondary)" }}>
+                    {x.day}
+                  </div>
+                  <div className="work-schedule-week-card-value font-semibold break-words whitespace-normal min-w-0" style={{ color: "var(--text-primary)" }}>
                     {x.point}
                   </div>
                 </div>
@@ -1225,11 +1389,11 @@ export default function WorkScheduleBoard({
         </div>
       ) : (
         <div
-          className="min-w-0 w-full overflow-x-auto overflow-y-auto rounded-lg overscroll-x-contain touch-pan-x [-webkit-overflow-scrolling:touch]"
+          className="work-schedule-table-wrap min-w-0 w-full overflow-x-auto overflow-y-auto rounded-lg overscroll-x-contain touch-pan-x [-webkit-overflow-scrolling:touch]"
           style={{ border: "1px solid var(--border)" }}
         >
           <table
-            className="min-w-[720px] sm:min-w-[860px] md:min-w-[980px] w-full text-xs"
+            className="work-schedule-table min-w-[720px] sm:min-w-[860px] md:min-w-[980px] w-full text-xs"
             style={{ backgroundColor: "var(--bg-primary)", tableLayout: "fixed" }}
           >
             <colgroup>
@@ -1241,13 +1405,17 @@ export default function WorkScheduleBoard({
             <thead style={{ backgroundColor: "var(--bg-secondary)" }}>
               <tr>
                 <th
-                  className="text-left px-3 py-2 max-md:relative md:sticky md:left-0 z-20 truncate md:border-r shadow-[2px_0_8px_-4px_rgba(0,0,0,0.12)]"
+                  className="work-schedule-point-cell text-left px-2 sm:px-3 py-2 max-md:relative md:sticky md:left-0 z-20 md:truncate md:border-r shadow-[2px_0_8px_-4px_rgba(0,0,0,0.12)] break-words"
                   style={{ backgroundColor: "var(--bg-secondary)", color: "var(--text-secondary)" }}
                 >
                   Точка
                 </th>
                 {weekDays.map((d) => (
-                  <th key={d.key} className="text-left px-2 sm:px-3 py-2 min-w-0" style={{ color: "var(--text-secondary)" }}>
+                  <th
+                    key={d.key}
+                    className="text-left px-2 sm:px-3 py-2 min-w-0 break-words whitespace-normal"
+                    style={{ color: "var(--text-secondary)" }}
+                  >
                     {d.label}
                   </th>
                 ))}
@@ -1257,7 +1425,7 @@ export default function WorkScheduleBoard({
               {points.map((point) => (
                 <tr key={point} style={{ borderTop: "1px solid var(--border)" }}>
                   <td
-                    className="px-3 py-2 max-md:relative md:sticky md:left-0 z-10 align-top font-medium truncate md:border-r"
+                    className="work-schedule-point-cell px-2 sm:px-3 py-2 max-md:relative md:sticky md:left-0 z-10 align-top font-medium md:truncate md:border-r break-words whitespace-normal"
                     style={{ backgroundColor: "var(--bg-primary)", color: "var(--text-primary)" }}
                     title={point}
                   >
@@ -1273,12 +1441,16 @@ export default function WorkScheduleBoard({
                     return (
                       <td
                         key={`${point}-${d.key}`}
-                        className={`px-3 py-2 align-top whitespace-pre-wrap break-words relative ${mode === "admin" ? "cursor-pointer" : ""}`}
+                        className={`px-2 sm:px-3 py-2 align-top whitespace-normal break-words overflow-wrap-anywhere relative min-w-0 ${mode === "admin" ? "cursor-pointer" : ""}`}
                         onClick={() => onCellClick(point, d.key)}
+                        onDragOver={mode === "admin" ? handleScheduleCellDragOver(point, d.key) : undefined}
+                        onDragLeave={mode === "admin" ? handleScheduleCellDragLeave(point, d.key) : undefined}
+                        onDrop={mode === "admin" ? handleScheduleCellDrop(point, d.key) : undefined}
                         style={{
                           color: highlight ? "var(--accent)" : "var(--text-primary)",
                           backgroundColor: highlight ? "var(--accent-light)" : "transparent",
                           fontWeight: highlight ? 700 : 400,
+                          ...(mode === "admin" ? scheduleCellDropStyle(point, d.key) : {}),
                         }}
                       >
                         {mode === "admin" && person !== "—" && (
@@ -1308,7 +1480,7 @@ export default function WorkScheduleBoard({
                             ×
                           </button>
                         )}
-                        {person}
+                        {renderScheduleCellConsultants(person, point, d.key, highlight)}
                       </td>
                     );
                   })}

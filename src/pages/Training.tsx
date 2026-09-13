@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, type TrainingArticleItem, type TrainingCourseRow } from "../api";
+import { api, type TrainingArticleListItem, type TrainingCourseRow } from "../api";
 import { useAuth } from "../contexts/AuthContext";
 
 function fmtDate(v?: string | null) {
@@ -14,8 +14,9 @@ export default function Training() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const isAdmin = user?.is_admin === true;
+  const canAnalytics = isAdmin || user?.is_manager === true;
   const [tab, setTab] = useState<"articles" | "courses">("articles");
-  const [articles, setArticles] = useState<TrainingArticleItem[]>([]);
+  const [articles, setArticles] = useState<TrainingArticleListItem[]>([]);
   const [courses, setCourses] = useState<TrainingCourseRow[]>([]);
   const [selectedSection, setSelectedSection] = useState<string>("Все");
   const [loading, setLoading] = useState(true);
@@ -79,26 +80,38 @@ export default function Training() {
           <h1 className="text-2xl font-bold mb-2" style={{ color: "var(--text-primary)" }}>Обучение</h1>
           <p className="text-sm" style={{ color: "var(--text-secondary)" }}>Курсы со структурой, тестами и сертификатом; статьи и инструкции</p>
         </div>
-        {isAdmin && (
-          <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-2">
+          {canAnalytics ? (
             <button
               type="button"
-              onClick={() => navigate("/training/course/new")}
-              className="px-4 py-2.5 rounded-xl text-sm font-semibold"
-              style={{ background: "var(--accent)", color: "#fff" }}
-            >
-              + Курс
-            </button>
-            <button
-              type="button"
-              onClick={() => navigate("/training/new")}
+              onClick={() => navigate("/training/analytics")}
               className="px-4 py-2.5 rounded-xl text-sm font-semibold border"
               style={{ borderColor: "var(--border)", color: "var(--text-primary)" }}
             >
-              + Статья
+              Аналитика статей
             </button>
-          </div>
-        )}
+          ) : null}
+          {isAdmin ? (
+            <>
+              <button
+                type="button"
+                onClick={() => navigate("/training/course/new")}
+                className="px-4 py-2.5 rounded-xl text-sm font-semibold"
+                style={{ background: "var(--accent)", color: "#fff" }}
+              >
+                + Курс
+              </button>
+              <button
+                type="button"
+                onClick={() => navigate("/training/new")}
+                className="px-4 py-2.5 rounded-xl text-sm font-semibold border"
+                style={{ borderColor: "var(--border)", color: "var(--text-primary)" }}
+              >
+                + Статья
+              </button>
+            </>
+          ) : null}
+        </div>
       </div>
 
       <div className="flex gap-2 mb-4">
@@ -250,30 +263,47 @@ export default function Training() {
                   </div>
                   <div className="font-semibold text-sm line-clamp-2" style={{ color: "var(--text-primary)" }}>{a.title}</div>
                   <div className="text-xs mt-2" style={{ color: "var(--text-tertiary)" }}>{fmtDate(a.updated_at)}</div>
-                  {isAdmin && (
-                    <div className="mt-3 flex gap-2">
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          navigate(`/training/${a.id}/edit`);
-                        }}
-                        className="px-2.5 py-1.5 rounded-lg text-xs"
-                        style={{ background: "var(--bg-primary)", border: "1px solid var(--border)", color: "var(--text-primary)" }}
-                      >
-                        Изменить
-                      </button>
-                      <button
-                        type="button"
-                        onClick={async (e) => {
-                          e.stopPropagation();
-                          await deleteArticle(a.id);
-                        }}
-                        className="px-2.5 py-1.5 rounded-lg text-xs"
-                        style={{ background: "var(--error-light)", border: "1px solid var(--error)", color: "var(--error)" }}
-                      >
-                        Удалить
-                      </button>
+                  {(canAnalytics || isAdmin) && (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {canAnalytics ? (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            navigate(`/training/${a.id}/report`);
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg text-xs"
+                          style={{ background: "var(--accent-light)", border: "1px solid var(--accent)", color: "var(--accent)" }}
+                        >
+                          Статистика
+                        </button>
+                      ) : null}
+                      {isAdmin ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              navigate(`/training/${a.id}/edit`);
+                            }}
+                            className="px-2.5 py-1.5 rounded-lg text-xs"
+                            style={{ background: "var(--bg-primary)", border: "1px solid var(--border)", color: "var(--text-primary)" }}
+                          >
+                            Изменить
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              await deleteArticle(a.id);
+                            }}
+                            className="px-2.5 py-1.5 rounded-lg text-xs"
+                            style={{ background: "var(--error-light)", border: "1px solid var(--error)", color: "var(--error)" }}
+                          >
+                            Удалить
+                          </button>
+                        </>
+                      ) : null}
                     </div>
                   )}
                 </div>

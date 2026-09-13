@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { useNavigate, Navigate } from "react-router-dom";
+import { Link, useNavigate, Navigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import { api } from "../api";
+import { recordAuthError } from "../utils/authDiagnostics";
 
 export default function Login() {
   const { user, login } = useAuth();
@@ -46,7 +47,9 @@ export default function Login() {
         setNewPassword2("");
         setError("");
       } else {
-        setError(err instanceof Error ? err.message : "Ошибка входа");
+        const message = err instanceof Error ? err.message : "Ошибка входа";
+        recordAuthError(message, "login");
+        setError(message);
       }
     } finally {
       setLoading(false);
@@ -351,10 +354,17 @@ export default function Login() {
         </div>
 
         {/* Дополнительная информация */}
-        <div className="mt-6 text-center">
+        <div className="mt-6 text-center space-y-2">
           <p className="text-xs sm:text-sm" style={{ color: 'var(--text-tertiary)' }}>
             Защищенное соединение • Все данные зашифрованы
           </p>
+          <Link
+            to="/status"
+            className="text-xs sm:text-sm underline underline-offset-2"
+            style={{ color: 'var(--accent)' }}
+          >
+            Не получается войти? Диагностика
+          </Link>
         </div>
       </div>
     </div>

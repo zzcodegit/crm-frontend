@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
@@ -9,7 +10,19 @@ export default defineConfig({
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version ?? "0"),
   },
-  plugins: [tailwindcss(), react()],
+  plugins: [
+    tailwindcss(),
+    react(),
+    {
+      name: "build-version-json",
+      writeBundle() {
+        writeFileSync(
+          join(process.cwd(), "dist/build-version.json"),
+          JSON.stringify({ version: pkg.version ?? "0", builtAt: Date.now() }),
+        );
+      },
+    },
+  ],
   server: {
     host: "0.0.0.0",
     allowedHosts: ["mosoptika-study.ru", "www.mosoptika-study.ru"],

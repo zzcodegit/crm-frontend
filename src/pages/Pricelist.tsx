@@ -1,11 +1,21 @@
 import { useState, useEffect, useLayoutEffect, useRef, useMemo, memo } from "react";
-import { Link, useSearchParams, useLocation } from "react-router-dom";
+import { Link, useSearchParams, useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { parsePriceFromText, priceFromFromText, formatPricelistPriceRub } from "../utils/pricelistPrice";
+import { pricelistPricesPath, type PricelistBasePath } from "../utils/pricelistRoutes";
+import { exportPricelistToXlsx, type PricelistExportCatalog } from "../utils/pricelistExportXlsx";
 import { useAuth } from "../contexts/AuthContext";
 import type { ManufacturerItem, PricelistGroupItem } from "../api";
 import LensTranspositionDrawer from "../components/LensTranspositionDrawer";
 import { isNativeAppShell } from "../utils/nativeApp";
+import {
+  effectiveLensColumnLabel,
+  lensUiFromCatalogCustomValues,
+  type MklLensColumnKey,
+  type PricelistLensCatalog,
+  listLensColumnKeysForRow,
+  listLensColumnKeysForRows,
+} from "../utils/mklLensParamsUi";
 
 export interface PricelistRow {
   id: number;
@@ -34,6 +44,10 @@ export interface PricelistRow {
   /** «Показывать только администратору» (в форме сейчас только RX; API может вернуть для любого каталога) — в APK скрываем */
   adminOnly?: boolean;
   barcodes: { code: string; price: number | null; description?: string | null }[];
+  /** Группы штрихкодов с названиями (если в БД несколько секций). */
+  barcodeSections: { name: string | null; items: { code: string; price: number | null; description?: string | null }[] }[];
+  /** Настройки отображения параметров линзы (__mkl_lens_ui / __pricelist_lens_ui). */
+  customValues?: Record<string, string | string[] | boolean | null>;
 }
 
 type PricelistBulkRow = {
@@ -127,22 +141,71 @@ function parseDiameters(diameters: string): string[] {
 }
 
 // Значения столбиком: разбиваем по запятой, каждое с новой строки; диапазоны без переноса; без единиц D и мм
+/** Пустая ячейка — не «—», а пробел (неразрывный, чтобы строка не схлопывалась). */
+const LENS_PARAM_EMPTY = "\u00a0";
+
 const ValuesColumn = memo(function ValuesColumn({ value, className = "text-xs" }: { value: string; className?: string }) {
   const displayValue = value.replace(/\s+D\b/g, "").replace(/\s*мм\s*/g, "").trim();
-  const parts = displayValue.split(/,\s*/).map((s) => s.trim()).filter(Boolean);
-  if (parts.length <= 1) {
-    return <div className={`${className} leading-snug whitespace-nowrap`} style={{ color: "var(--text-primary)" }}>{displayValue}</div>;
+  if (!displayValue) {
+    return (
+      <div
+        className={`${className} leading-snug whitespace-nowrap min-h-[1.25em] flex items-center justify-center`}
+        style={{ color: "var(--text-tertiary)" }}
+        aria-hidden
+      >
+        {LENS_PARAM_EMPTY}
+      </div>
+    );
   }
+  if (!displayValue.includes(",")) {
+    return (
+      <div className={`${className} leading-snug whitespace-nowrap`} style={{ color: "var(--text-primary)" }}>
+        {displayValue}
+      </div>
+    );
+  }
+  const parts = displayValue.split(/,\s*/).map((s) => s.trim());
   return (
     <div className="flex flex-col gap-0.5">
       {parts.map((part, i) => (
-        <div key={i} className={`${className} leading-snug whitespace-nowrap`} style={{ color: "var(--text-primary)" }}>{part}</div>
+        <div
+          key={i}
+          className={`${className} leading-snug whitespace-nowrap min-h-[1.25em] flex items-center justify-center`}
+          style={{ color: part ? "var(--text-primary)" : "var(--text-tertiary)" }}
+        >
+          {part || LENS_PARAM_EMPTY}
+        </div>
       ))}
     </div>
   );
 });
 
-function apiItemToRow(item: import("../api").PricelistItemResponse): PricelistRow {
+function mapBarcodeEntry(b: { code?: string | null; price?: number | null; description?: string | null }) {
+  return {
+    code: String(b.code ?? "").trim(),
+    price: b.price == null ? null : Number(b.price),
+    description: b.description ?? null,
+  };
+}
+
+function barcodeSectionsFromItem(item: import("../api").PricelistItemResponse): PricelistRow["barcodeSections"] {
+  if (item.barcode_sections && item.barcode_sections.length > 0) {
+    return item.barcode_sections
+      .map((sec) => ({
+        name: sec.name?.trim() || null,
+        items: (sec.items ?? []).map(mapBarcodeEntry).filter((b) => b.code),
+      }))
+      .filter((sec) => sec.items.length > 0);
+  }
+  const flat = (item.barcodes ?? []).map(mapBarcodeEntry).filter((b) => b.code);
+  if (flat.length > 0) return [{ name: null, items: flat }];
+  const legacy = (item.barcode ?? "").trim();
+  if (legacy) return [{ name: null, items: [{ code: legacy, price: null, description: null }] }];
+  return [];
+}
+
+export function apiItemToRow(item: import("../api").PricelistItemResponse): PricelistRow {
+  const barcodeSections = barcodeSectionsFromItem(item);
   return {
     id: item.id,
     manufacturer: item.manufacturer_name,
@@ -163,12 +226,48 @@ function apiItemToRow(item: import("../api").PricelistItemResponse): PricelistRo
     featureIds: item.feature_ids ?? [],
     hideDetailLink: item.hide_detail_link ?? false,
     adminOnly: item.admin_only === true,
-    barcodes: (item.barcodes ?? []).map((b) => ({
-      code: String(b.code ?? "").trim(),
-      price: b.price == null ? null : Number(b.price),
-      description: b.description ?? null,
-    })),
+    barcodeSections,
+    barcodes: barcodeSections.flatMap((sec) => sec.items),
+    customValues: item.custom_values ?? undefined,
   };
+}
+
+function lensValueFromRow(row: PricelistRow, key: MklLensColumnKey): string {
+  switch (key) {
+    case "sph":
+      return row.sph ?? "";
+    case "cyl":
+      return row.cyl ?? "";
+    case "step":
+      return row.step ?? "";
+    case "diameters":
+      return row.diameters ?? "";
+    case "replacement":
+      return row.material ?? "";
+    case "baseCurve":
+      return row.coefficient ?? "";
+    default:
+      return "";
+  }
+}
+
+function normalizeLensListDisplayValue(catalog: PricelistLensCatalog, key: MklLensColumnKey, value: string): string {
+  let v = value.trim();
+  if (!v) return "";
+  if (key === "cyl") v = v.replace(/\s+D\b/g, "");
+  if (key === "diameters" && catalog !== "mkl") v = v.replace(/\s*мм\s*/gi, "").trim();
+  return v.trim();
+}
+
+/** Значение для плитки: пустые сегменты между запятыми — пробел, как в таблице списка. */
+function formatLensListTileValue(catalog: PricelistLensCatalog, key: MklLensColumnKey, value: string): string {
+  const displayValue = normalizeLensListDisplayValue(catalog, key, value);
+  if (!displayValue) return "";
+  if (!displayValue.includes(",")) return displayValue;
+  return displayValue
+    .split(/,\s*/)
+    .map((s) => s.trim() || LENS_PARAM_EMPTY)
+    .join(", ");
 }
 
 export type PricelistPageProps = {
@@ -183,6 +282,7 @@ export default function Pricelist({
   title = "Прайс склад",
   subtitle = "Актуальные цены на линзы. Производители из справочника.",
 }: PricelistPageProps = {}) {
+  const navigate = useNavigate();
   const catalog = basePath === "/pricelist-rx" ? "rx" : basePath === "/pricelist-mkl" ? "mkl" : "warehouse";
   const plApi = catalog === "rx" ? api.pricelistRx : catalog === "mkl" ? api.pricelistMkl : api.pricelist;
   const plRef = catalog === "rx" ? api.ref.pricelistRx : catalog === "mkl" ? api.ref.pricelistMkl : api.ref.pricelist;
@@ -193,7 +293,7 @@ export default function Pricelist({
   const [searchParams, setSearchParams] = useSearchParams();
   const location = useLocation();
   const scrollSyncRef = useRef(false);
-  const isAdmin = user?.is_admin === true;
+  const isAdmin = user?.role === "admin" || user?.is_admin === true;
   const [manufacturers, setManufacturers] = useState<ManufacturerItem[]>([]);
   const [pricelistFromApi, setPricelistFromApi] = useState<PricelistRow[]>([]);
   const [pricelistLoading, setPricelistLoading] = useState(true);
@@ -202,7 +302,9 @@ export default function Pricelist({
   const [bulkOpen, setBulkOpen] = useState(false);
   const [transposeOpen, setTransposeOpen] = useState(false);
   const [bulkCreating, setBulkCreating] = useState(false);
+  const [exportXlsxLoading, setExportXlsxLoading] = useState(false);
   const [sortSavingId, setSortSavingId] = useState<number | null>(null);
+  const [copyBusyId, setCopyBusyId] = useState<number | null>(null);
   const [bulkRows, setBulkRows] = useState<PricelistBulkRow[]>([
     {
       key: Math.random().toString(36).slice(2),
@@ -227,15 +329,20 @@ export default function Pricelist({
   const manufacturerFilter = isAdmin ? (searchParams.get("manufacturer") || "Все поставщики") : "Все поставщики";
   const searchQuery = searchParams.get("q") ?? "";
 
+  const visibleGroupsList = useMemo(() => {
+    if (catalog !== "rx" || isAdmin) return groupsList;
+    return groupsList.filter((g) => !g.admin_only);
+  }, [groupsList, catalog, isAdmin]);
+
   const groupMetaByName = useMemo(() => {
     const m = new Map<string, PricelistGroupItem>();
-    for (const g of groupsList) m.set(g.name, g);
+    for (const g of visibleGroupsList) m.set(g.name, g);
     return m;
-  }, [groupsList]);
+  }, [visibleGroupsList]);
 
-  const groupOrder = groupsList.length > 0 ? groupsList.map((g) => g.name) : GROUP_ORDER_FALLBACK;
+  const groupOrder = visibleGroupsList.length > 0 ? visibleGroupsList.map((g) => g.name) : GROUP_ORDER_FALLBACK;
   const groupDisplayMap = new Map(
-    groupsList.map((g) => [normalizeGroupName(g.name), g.display_properties_in_list ?? true])
+    visibleGroupsList.map((g) => [normalizeGroupName(g.name), g.display_properties_in_list ?? true])
   );
   const groupsForFilter = ["Все группы", ...groupOrder];
 
@@ -293,6 +400,33 @@ export default function Pricelist({
   }, [catalog]);
 
   const nativeShell = isNativeAppShell();
+
+  const handleExportXlsx = async () => {
+    if (!isAdmin || exportXlsxLoading) return;
+    setExportXlsxLoading(true);
+    try {
+      const [items, features, customFields] = await Promise.all([
+        plApi.list(),
+        api.ref.features.list().catch(() => []),
+        api.ref.customFields.list().catch(() => []),
+      ]);
+      const exportItems = nativeShell ? items.filter((i) => !i.admin_only) : items;
+      const prefix =
+        catalog === "rx" ? "pricelist_rx" : catalog === "mkl" ? "pricelist_mkl" : "pricelist_sklad";
+      await exportPricelistToXlsx({
+        items: exportItems,
+        features: Array.isArray(features) ? features : [],
+        customFields: Array.isArray(customFields) ? customFields : [],
+        catalog: catalog as PricelistExportCatalog,
+        fileNamePrefix: prefix,
+      });
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Не удалось выгрузить прайслист");
+    } finally {
+      setExportXlsxLoading(false);
+    }
+  };
+
   const sourceList = useMemo(() => {
     if (!nativeShell) return pricelistFromApi;
     return pricelistFromApi.filter((row) => !row.adminOnly);
@@ -373,140 +507,6 @@ export default function Pricelist({
     }
     setVisibleRowsByGroup(next);
   }, [groupFilter, coefFilter, diameterFilter, manufacturerFilter, searchQuery, listToShowLengthForScroll]);
-
-  const [priceManageGroup, setPriceManageGroup] = useState<string | null>(null);
-  const [priceDraft, setPriceDraft] = useState<
-    Record<number, { priceStr: string; priceFrom: boolean; barcodePriceStrs: string[] }>
-  >({});
-  const [priceBulkSaving, setPriceBulkSaving] = useState(false);
-
-  const priceManageRowsAll = useMemo(() => {
-    if (!priceManageGroup) return [];
-    const raw = pricelistFromApi.filter((r) => r.group === priceManageGroup);
-    const filteredWithManufacturer = raw.filter((row) => manufacturerNames.includes(row.manufacturer));
-    const order = new Map(manufacturers.map((m, i) => [m.name, i]));
-    return [...filteredWithManufacturer].sort((a, b) => {
-      if (a.sortIndex !== b.sortIndex) return a.sortIndex - b.sortIndex;
-      const ma = order.get(a.manufacturer) ?? 999;
-      const mb = order.get(b.manufacturer) ?? 999;
-      if (ma !== mb) return ma - mb;
-      return a.id - b.id;
-    });
-  }, [priceManageGroup, pricelistFromApi, manufacturers, manufacturerNames]);
-
-  useEffect(() => {
-    if (!priceManageGroup) {
-      setPriceDraft({});
-      return;
-    }
-    const next: Record<number, { priceStr: string; priceFrom: boolean; barcodePriceStrs: string[] }> = {};
-    for (const r of priceManageRowsAll) {
-      next[r.id] = {
-        priceStr: Number.isFinite(r.price) ? String(r.price) : "",
-        priceFrom: !!r.priceFrom,
-        barcodePriceStrs: (r.barcodes ?? []).map((b) => (b.price == null ? "" : String(b.price))),
-      };
-    }
-    setPriceDraft(next);
-  }, [priceManageGroup, priceManageRowsAll]);
-
-  const savePriceManage = async () => {
-    if (!priceManageGroup || !isAdmin) return;
-    const updates: {
-      id: number;
-      price: number;
-      price_from: boolean;
-      barcodes?: { code: string; price?: number; description?: string }[];
-    }[] = [];
-    for (const r of priceManageRowsAll) {
-      const d = priceDraft[r.id];
-      if (!d) continue;
-      const parsed = Number.parseFloat(String(d.priceStr ?? "").trim().replace(",", "."));
-      if (!Number.isFinite(parsed)) {
-        alert(`Укажите корректную цену для «${r.lensName}»`);
-        return;
-      }
-      const pf = d.priceFrom;
-      let barcodeChanged = false;
-      const nextBarcodes: { code: string; price?: number; description?: string }[] = [];
-      let barcodeInvalid = false;
-      for (let i = 0; i < (r.barcodes ?? []).length; i += 1) {
-        const b = r.barcodes[i]!;
-        const raw = (d.barcodePriceStrs?.[i] ?? "").trim();
-        if (raw === "") {
-          if (b.price != null) barcodeChanged = true;
-          nextBarcodes.push({ code: b.code, description: b.description ?? undefined });
-          continue;
-        }
-        const parsedBarcodePrice = Number.parseFloat(raw.replace(",", "."));
-        if (!Number.isFinite(parsedBarcodePrice)) {
-          alert(`Укажите корректную цену штрихкода «${b.code}» для «${r.lensName}»`);
-          barcodeInvalid = true;
-          break;
-        }
-        if (b.price == null || parsedBarcodePrice !== b.price) barcodeChanged = true;
-        nextBarcodes.push({ code: b.code, price: parsedBarcodePrice, description: b.description ?? undefined });
-      }
-      if (barcodeInvalid) return;
-      if (parsed !== r.price || pf !== !!r.priceFrom || barcodeChanged) {
-        updates.push({
-          id: r.id,
-          price: parsed,
-          price_from: pf,
-          ...(barcodeChanged ? { barcodes: nextBarcodes } : {}),
-        });
-      }
-    }
-    if (updates.length === 0) {
-      setPriceManageGroup(null);
-      return;
-    }
-    setPriceBulkSaving(true);
-    try {
-      for (const u of updates) {
-        await plRef.update(u.id, {
-          price: u.price,
-          price_from: u.price_from,
-          ...(u.barcodes ? { barcodes: u.barcodes } : {}),
-        });
-      }
-      setPricelistFromApi((prev) =>
-        prev.map((row) => {
-          const u = updates.find((x) => x.id === row.id);
-          return u
-            ? {
-                ...row,
-                price: u.price,
-                priceFrom: u.price_from,
-                ...(u.barcodes
-                  ? {
-                      barcodes: u.barcodes.map((b) => ({
-                        code: b.code,
-                        price: b.price ?? null,
-                        description: b.description ?? null,
-                      })),
-                    }
-                  : {}),
-              }
-            : row;
-        })
-      );
-      setPriceManageGroup(null);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Ошибка сохранения цен");
-    } finally {
-      setPriceBulkSaving(false);
-    }
-  };
-
-  useEffect(() => {
-    if (!priceManageGroup) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !priceBulkSaving) setPriceManageGroup(null);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [priceManageGroup, priceBulkSaving]);
 
   // Прокрутка к секции из hash (в т.ч. после «Назад» с карточки)
   useLayoutEffect(() => {
@@ -596,7 +596,7 @@ export default function Pricelist({
   // NOTE: Синхронизацию hash при каждом скролле отключили:
   // на длинном прайсе это давало forced reflow и лаги.
 
-  const groupOptionsForBulk = groupsList.length > 0 ? groupsList.map((g) => g.name) : GROUP_ORDER_FALLBACK;
+  const groupOptionsForBulk = visibleGroupsList.length > 0 ? visibleGroupsList.map((g) => g.name) : GROUP_ORDER_FALLBACK;
 
   const parsePrice = (s: string) => parsePriceFromText(s);
 
@@ -725,6 +725,56 @@ export default function Pricelist({
     }
   };
 
+  const handleCopy = async (id: number, lensName: string) => {
+    if (!isAdmin) return;
+    if (copyBusyId != null) return;
+    const nextName = `${(lensName || "").trim()} (копия)`.trim();
+    if (!window.confirm(`Скопировать карточку «${lensName}»?`)) return;
+    try {
+      setCopyBusyId(id);
+      const item = await plApi.get(id);
+      const created = await plRef.create({
+        manufacturer_id: item.manufacturer_id ?? 0,
+        lens_name: nextName || item.lens_name,
+        description: item.description ?? undefined,
+        full_description: item.full_description ?? undefined,
+        barcode: item.barcode ?? undefined,
+        barcodes: item.barcodes?.map((b) => ({ code: b.code, price: b.price ?? undefined, description: b.description ?? undefined })),
+        barcode_sections: item.barcode_sections?.map((sec) => ({
+          name: sec.name ?? null,
+          items: (sec.items ?? []).map((it) => ({ code: it.code, price: it.price ?? undefined, description: it.description ?? undefined })),
+        })),
+        photo_url: item.photo_url ?? undefined,
+        photo_urls: item.photo_urls ?? undefined,
+        sph: item.sph ?? undefined,
+        cyl: item.cyl ?? undefined,
+        step: item.step ?? undefined,
+        diameters: item.diameters ?? undefined,
+        price: item.price,
+        sort_index: item.sort_index ?? undefined,
+        price_from: item.price_from ?? undefined,
+        is_promo: item.is_promo ?? undefined,
+        uv_protection: item.uv_protection ?? undefined,
+        material: item.material ?? undefined,
+        lens_id: item.lens_id ?? undefined,
+        group: item.group,
+        coefficient: item.coefficient ?? undefined,
+        feature_ids: item.feature_ids ?? [],
+        feature_colors: item.feature_colors ?? undefined,
+        custom_values: item.custom_values ?? undefined,
+        hide_detail_link: item.hide_detail_link ?? undefined,
+        hide_photo: item.hide_photo ?? undefined,
+        enable_transposition_calc: item.enable_transposition_calc ?? undefined,
+        admin_only: item.admin_only ?? undefined,
+      });
+      navigate(`${basePath}/${created.id}/edit`);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Не удалось скопировать карточку");
+    } finally {
+      setCopyBusyId(null);
+    }
+  };
+
   const manufacturerOptions = [
     "Все поставщики",
     ...new Set(
@@ -752,6 +802,8 @@ export default function Pricelist({
     getManufacturer(manufacturerName)?.country?.name ?? "—";
   const getManufacturerImageUrl = (manufacturerName: string) =>
     getManufacturer(manufacturerName)?.image_url ?? null;
+  const getManufacturerBorderColor = (manufacturerName: string) =>
+    getManufacturer(manufacturerName)?.border_color ?? null;
 
   return (
     <div className="max-w-7xl animate-slide-in space-y-6">
@@ -765,6 +817,22 @@ export default function Pricelist({
           </p>
         </div>
         <div className="flex flex-wrap gap-2 justify-end">
+          {isAdmin && (
+            <button
+              type="button"
+              disabled={exportXlsxLoading || pricelistLoading}
+              onClick={() => void handleExportXlsx()}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium transition-opacity hover:opacity-90 disabled:opacity-50"
+              style={{
+                background: "var(--bg-secondary)",
+                color: "var(--text-primary)",
+                border: "1px solid var(--border-color)",
+              }}
+            >
+              <span aria-hidden>⬇</span>
+              <span>{exportXlsxLoading ? "Формирование…" : "Скачать XLSX"}</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setTransposeOpen(true)}
@@ -780,6 +848,17 @@ export default function Pricelist({
           </button>
           {user?.is_admin && (
             <>
+              <Link
+                to={pricelistPricesPath(basePath as PricelistBasePath)}
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium transition-opacity hover:opacity-90"
+                style={{
+                  background: "var(--accent-light)",
+                  color: "var(--accent)",
+                  border: "1px solid var(--accent)",
+                }}
+              >
+                <span>Управление ценами</span>
+              </Link>
               <Link
                 to={`${basePath}/new`}
                 className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium text-white transition-opacity hover:opacity-90"
@@ -1146,6 +1225,7 @@ export default function Pricelist({
                 const totalRows = rows.length;
                 const visibleRows = rows.slice(0, visibleRowsByGroup[groupName] ?? GROUP_VISIBLE_ROWS_INITIAL);
                 const hasMoreRows = visibleRows.length < totalRows;
+                const groupLensColumnKeys = listLensColumnKeysForRows(rows, catalog);
                 return (
                   <>
               <div
@@ -1156,14 +1236,13 @@ export default function Pricelist({
                   {groupName}
                 </h2>
                 {isAdmin && rows.length > 0 ? (
-                  <button
-                    type="button"
-                    onClick={() => setPriceManageGroup(groupName)}
-                    className="text-sm font-semibold px-3 py-1.5 rounded-lg shrink-0 transition-opacity hover:opacity-90"
+                  <Link
+                    to={pricelistPricesPath(basePath as PricelistBasePath, groupName)}
+                    className="text-sm font-semibold px-3 py-1.5 rounded-lg shrink-0 transition-opacity hover:opacity-90 inline-block"
                     style={{ background: "var(--accent-light)", color: "var(--accent)", border: "1px solid var(--accent)" }}
                   >
-                    Управление ценами
-                  </button>
+                    Цены группы
+                  </Link>
                 ) : null}
               </div>
               {(() => {
@@ -1197,8 +1276,13 @@ export default function Pricelist({
                                 <img
                                   src={getManufacturerImageUrl(row.manufacturer)!}
                                   alt=""
-                                  className="w-10 h-10 rounded-lg object-contain shrink-0"
-                                  style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}
+                                  className="w-[115px] h-[100px] rounded-lg object-contain shrink-0"
+                                  style={{
+                                    background: "var(--bg-secondary)",
+                                    border: getManufacturerBorderColor(row.manufacturer)
+                                      ? `5px solid ${getManufacturerBorderColor(row.manufacturer)}`
+                                      : "1px solid var(--border)",
+                                  }}
                                 />
                               ) : null}
                               <div className="min-w-0 flex-1">
@@ -1211,19 +1295,27 @@ export default function Pricelist({
                             ) : (
                               <div className="flex-1 min-h-[8px]" />
                             )}
-                            {showProperties && (row.sph || row.cyl || row.step || row.diameters || (catalog === "mkl" && (row.material || row.coefficient))) ? (
+                            {showProperties && groupLensColumnKeys.length > 0 ? (
                               <div className="text-[11px] mt-2 space-y-0.5 max-h-16 overflow-hidden" style={{ color: "var(--text-tertiary)" }}>
-                                {row.sph ? <div className="truncate"><span className="font-semibold" style={{ color: "var(--text-secondary)" }}>SPH</span> {row.sph.replace(/\s+D\b/g, "")}</div> : null}
-                                {row.cyl ? <div className="truncate"><span className="font-semibold" style={{ color: "var(--text-secondary)" }}>CYL</span> {row.cyl.replace(/\s+D\b/g, "")}</div> : null}
-                                {row.step ? <div className="truncate"><span className="font-semibold" style={{ color: "var(--text-secondary)" }}>Шаг</span> {row.step}</div> : null}
-                                {row.diameters ? (
-                                  <div className="truncate">
-                                    <span className="font-semibold" style={{ color: "var(--text-secondary)" }}>{catalog === "mkl" ? "Матриал/Влаг" : "Ø"}</span>{" "}
-                                    {catalog === "mkl" ? row.diameters : row.diameters.replace(/\s*мм\s*/gi, "").trim()}
-                                  </div>
-                                ) : null}
-                                {catalog === "mkl" && row.material ? <div className="truncate"><span className="font-semibold" style={{ color: "var(--text-secondary)" }}>Режим замены</span> {row.material}</div> : null}
-                                {catalog === "mkl" && row.coefficient ? <div className="truncate"><span className="font-semibold" style={{ color: "var(--text-secondary)" }}>ВС</span> {row.coefficient}</div> : null}
+                                {(() => {
+                                  const lensUi = lensUiFromCatalogCustomValues(catalog, row.customValues);
+                                  const rowKeys = listLensColumnKeysForRow(lensUi, groupLensColumnKeys);
+                                  return rowKeys.map((key) => {
+                                    const raw = lensValueFromRow(row, key);
+                                    const display = formatLensListTileValue(catalog, key, raw);
+                                    const label = effectiveLensColumnLabel(lensUi, catalog, key);
+                                    return (
+                                      <div key={key} className="truncate min-h-[1.1em]">
+                                        <span className="font-semibold" style={{ color: "var(--text-secondary)" }}>
+                                          {label}
+                                        </span>{" "}
+                                        <span style={{ color: display ? "var(--text-tertiary)" : "var(--text-tertiary)" }}>
+                                          {display || LENS_PARAM_EMPTY}
+                                        </span>
+                                      </div>
+                                    );
+                                  });
+                                })()}
                               </div>
                             ) : null}
                             <div className="mt-auto pt-3 flex flex-wrap items-center justify-between gap-2 border-t" style={{ borderColor: "var(--border)" }}>
@@ -1290,6 +1382,20 @@ export default function Pricelist({
                                     </Link>
                                     <button
                                       type="button"
+                                      onClick={() => void handleCopy(row.id, row.lensName)}
+                                      disabled={copyBusyId === row.id}
+                                      className="inline-flex items-center justify-center w-9 h-9 rounded-lg transition-all hover:opacity-90 shrink-0 disabled:opacity-50"
+                                      style={{ background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)" }}
+                                      title="Копировать"
+                                      aria-label="Копировать"
+                                    >
+                                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                                      </svg>
+                                    </button>
+                                    <button
+                                      type="button"
                                       onClick={() => handleDelete(row.id, row.lensName)}
                                       className="inline-flex items-center justify-center w-9 h-9 rounded-lg transition-all hover:opacity-90 shrink-0"
                                       style={{ background: "var(--error-light)", color: "var(--error)", border: "1px solid var(--error)" }}
@@ -1337,8 +1443,13 @@ export default function Pricelist({
                       <img
                         src={getManufacturerImageUrl(row.manufacturer)!}
                         alt={row.manufacturer}
-                        className="w-12 h-12 rounded-xl object-contain shrink-0"
-                        style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}
+                        className="w-[115px] h-[100px] rounded-xl object-contain shrink-0"
+                        style={{
+                          background: "var(--bg-secondary)",
+                          border: getManufacturerBorderColor(row.manufacturer)
+                            ? `5px solid ${getManufacturerBorderColor(row.manufacturer)}`
+                            : "1px solid var(--border)",
+                        }}
                       />
                     ) : null}
                     <div className="min-w-0 w-full">
@@ -1351,40 +1462,35 @@ export default function Pricelist({
                   </div>
                 </div>
                 {/* Параметры: подписи ровно над значениями, разделители между колонками */}
-                {showProperties && (
+                {showProperties && groupLensColumnKeys.length > 0 ? (
+                  (() => {
+                  const lensUi = lensUiFromCatalogCustomValues(catalog, row.customValues);
+                  const rowKeys = listLensColumnKeysForRow(lensUi, groupLensColumnKeys);
+                  if (rowKeys.length === 0) return null;
+                  return (
                   <div className="min-w-0 py-2 px-4 rounded-xl">
-                    <div className={`grid ${catalog === "mkl" ? "grid-cols-6 gap-x-3 lg:gap-x-4" : "grid-cols-4 gap-x-6 lg:gap-x-10"}`}>
-                      <div className="min-w-0 flex flex-col items-center gap-1 w-full text-center">
-                        <span className="text-sm font-semibold uppercase tracking-wider shrink-0 px-2 py-0.5 rounded border border-b-2 inline-block" style={{ color: "var(--text-primary)", borderColor: "var(--accent)" }}>SPH</span>
-                        <div className="w-full flex justify-center"><ValuesColumn value={row.sph} className="text-base" /></div>
-                      </div>
-                      <div className="min-w-0 flex flex-col items-center gap-1 w-full text-center">
-                        <span className="text-sm font-semibold uppercase tracking-wider shrink-0 px-2 py-0.5 rounded border border-b-2 inline-block" style={{ color: "var(--text-primary)", borderColor: "var(--accent)" }}>CYL</span>
-                        <div className="w-full flex justify-center"><ValuesColumn value={row.cyl} className="text-base" /></div>
-                      </div>
-                      <div className="min-w-0 flex flex-col items-center gap-1 w-full text-center">
-                        <span className="text-sm font-semibold uppercase tracking-wider shrink-0 px-2 py-0.5 rounded border border-b-2 inline-block" style={{ color: "var(--text-primary)", borderColor: "var(--accent)" }}>Шаг</span>
-                        <div className="w-full flex justify-center"><ValuesColumn value={row.step} className="text-base" /></div>
-                      </div>
-                      <div className="min-w-0 flex flex-col items-center gap-1 w-full text-center">
-                        <span className="text-sm font-semibold uppercase tracking-wider shrink-0 px-2 py-0.5 rounded border border-b-2 inline-block" style={{ color: "var(--text-primary)", borderColor: "var(--accent)" }}>{catalog === "mkl" ? "Матриал/Влаг" : "Ø"}</span>
-                        <div className="w-full flex justify-center"><ValuesColumn value={row.diameters} className="text-base" /></div>
-                      </div>
-                      {catalog === "mkl" ? (
-                        <>
-                          <div className="min-w-0 flex flex-col items-center gap-1 w-full text-center">
-                            <span className="text-sm font-semibold uppercase tracking-wider shrink-0 px-2 py-0.5 rounded border border-b-2 inline-block" style={{ color: "var(--text-primary)", borderColor: "var(--accent)" }}>Режим замены</span>
-                            <div className="w-full flex justify-center"><ValuesColumn value={row.material ?? ""} className="text-base" /></div>
+                    <div
+                      className="grid gap-x-3 lg:gap-x-4"
+                      style={{ gridTemplateColumns: `repeat(${rowKeys.length}, minmax(0, 1fr))` }}
+                    >
+                      {rowKeys.map((key) => (
+                        <div key={key} className="min-w-0 flex flex-col items-center gap-1 w-full text-center">
+                          <span
+                            className="text-sm font-semibold uppercase tracking-wider shrink-0 px-2 py-0.5 rounded border border-b-2 inline-block"
+                            style={{ color: "var(--text-primary)", borderColor: "var(--accent)" }}
+                          >
+                            {effectiveLensColumnLabel(lensUi, catalog, key)}
+                          </span>
+                          <div className="w-full flex justify-center">
+                            <ValuesColumn value={lensValueFromRow(row, key)} className="text-base" />
                           </div>
-                          <div className="min-w-0 flex flex-col items-center gap-1 w-full text-center">
-                            <span className="text-sm font-semibold uppercase tracking-wider shrink-0 px-2 py-0.5 rounded border border-b-2 inline-block" style={{ color: "var(--text-primary)", borderColor: "var(--accent)" }}>ВС</span>
-                            <div className="w-full flex justify-center"><ValuesColumn value={row.coefficient} className="text-base" /></div>
-                          </div>
-                        </>
-                      ) : null}
+                        </div>
+                      ))}
                     </div>
                   </div>
-                )}
+                  );
+                  })()
+                ) : null}
                 {/* Цена и кнопки */}
                 <div className="min-w-0 flex flex-col gap-1 items-start md:items-end shrink-0 self-start w-[120px]">
                   <div className="font-bold tabular-nums leading-tight whitespace-nowrap h-7 flex items-center justify-end" style={{ color: row.is_promo ? "var(--error)" : "var(--text-primary)", fontSize: "22px" }}>{formatPricelistPriceRub(row.price, row.priceFrom)}</div>
@@ -1450,6 +1556,20 @@ export default function Pricelist({
                         </Link>
                         <button
                           type="button"
+                          onClick={() => void handleCopy(row.id, row.lensName)}
+                          disabled={copyBusyId === row.id}
+                          className="inline-flex items-center justify-center w-10 h-10 rounded-xl transition-all hover:opacity-90 shrink-0 flex-shrink-0 disabled:opacity-50"
+                          style={{ background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)" }}
+                          title="Копировать"
+                          aria-label="Копировать"
+                        >
+                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => handleDelete(row.id, row.lensName)}
                           className="inline-flex items-center justify-center w-10 h-10 rounded-xl transition-all hover:opacity-90 shrink-0 flex-shrink-0"
                           style={{ background: "var(--error-light)", color: "var(--error)", border: "1px solid var(--error)" }}
@@ -1492,184 +1612,6 @@ export default function Pricelist({
           ))
         )}
       </div>
-
-      {priceManageGroup ? (
-        <div
-          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4"
-          style={{ background: "rgba(0,0,0,0.5)" }}
-          onClick={() => {
-            if (!priceBulkSaving) setPriceManageGroup(null);
-          }}
-          role="presentation"
-        >
-          <div
-            className="w-full max-w-5xl max-h-[90vh] rounded-2xl flex flex-col overflow-hidden shadow-xl"
-            style={{ background: "var(--bg-primary)", border: "1px solid var(--border)" }}
-            onClick={(e) => e.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="pricelist-price-manage-title"
-          >
-            <div className="px-4 py-3 sm:px-5 sm:py-4 flex flex-wrap items-start justify-between gap-2 border-b" style={{ borderColor: "var(--border)" }}>
-              <div>
-                <h2 id="pricelist-price-manage-title" className="text-lg font-bold m-0" style={{ color: "var(--text-primary)" }}>
-                  Управление ценами
-                </h2>
-                <p className="text-sm m-0 mt-1" style={{ color: "var(--text-secondary)" }}>
-                  Группа «{priceManageGroup}» — {priceManageRowsAll.length}{" "}
-                  {priceManageRowsAll.length === 1 ? "позиция" : priceManageRowsAll.length < 5 ? "позиции" : "позиций"}
-                </p>
-              </div>
-              <button
-                type="button"
-                disabled={priceBulkSaving}
-                className="text-sm px-2 py-1 rounded-lg"
-                style={{ color: "var(--text-secondary)" }}
-                onClick={() => setPriceManageGroup(null)}
-              >
-                Закрыть
-              </button>
-            </div>
-            <div className="overflow-auto flex-1 min-h-0 px-2 sm:px-4 py-3">
-              <table className="w-full text-sm border-collapse">
-                <thead>
-                  <tr style={{ borderBottom: "1px solid var(--border)", color: "var(--text-secondary)" }}>
-                    <th className="text-left p-2 font-medium">Наименование</th>
-                    <th className="text-left p-2 font-medium hidden sm:table-cell">Поставщик</th>
-                    <th className="text-left p-2 font-medium w-24">Коэф.</th>
-                    <th className="text-right p-2 font-medium w-32">Цена, ₽</th>
-                    <th className="text-center p-2 font-medium w-20">«От»</th>
-                    <th className="text-left p-2 font-medium">Цены штрихкодов</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {priceManageRowsAll.map((row) => {
-                    const d = priceDraft[row.id];
-                    return (
-                      <tr key={row.id} style={{ borderBottom: "1px solid var(--border)" }}>
-                        <td className="p-2 align-middle" style={{ color: "var(--text-primary)" }}>
-                          <div className="font-medium">{row.lensName}</div>
-                          <div className="text-xs sm:hidden mt-0.5" style={{ color: "var(--text-secondary)" }}>
-                            {row.manufacturer}
-                          </div>
-                        </td>
-                        <td className="p-2 align-middle hidden sm:table-cell" style={{ color: "var(--text-secondary)" }}>
-                          {row.manufacturer}
-                        </td>
-                        <td className="p-2 align-middle" style={{ color: "var(--text-secondary)" }}>
-                          {row.coefficient || "—"}
-                        </td>
-                        <td className="p-2 align-middle text-right">
-                          <input
-                            type="number"
-                            min={0}
-                            step={0.01}
-                            value={d?.priceStr ?? ""}
-                            onChange={(e) =>
-                              setPriceDraft((prev) => ({
-                                ...prev,
-                                [row.id]: {
-                                  priceStr: e.target.value,
-                                  priceFrom: prev[row.id]?.priceFrom ?? !!row.priceFrom,
-                                  barcodePriceStrs: prev[row.id]?.barcodePriceStrs ?? [],
-                                },
-                              }))
-                            }
-                            className="w-full max-w-[9rem] ml-auto block px-2 py-1.5 rounded-lg text-right tabular-nums"
-                            style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-primary)" }}
-                            disabled={priceBulkSaving}
-                          />
-                        </td>
-                        <td className="p-2 align-middle text-center">
-                          <input
-                            type="checkbox"
-                            checked={d?.priceFrom ?? false}
-                            onChange={(e) =>
-                              setPriceDraft((prev) => ({
-                                ...prev,
-                                [row.id]: {
-                                  priceStr: prev[row.id]?.priceStr ?? (Number.isFinite(row.price) ? String(row.price) : ""),
-                                  priceFrom: e.target.checked,
-                                  barcodePriceStrs: prev[row.id]?.barcodePriceStrs ?? [],
-                                },
-                              }))
-                            }
-                            disabled={priceBulkSaving}
-                            title="Цена «от»"
-                            aria-label="Цена от"
-                          />
-                        </td>
-                        <td className="p-2 align-middle">
-                          {row.barcodes.length === 0 ? (
-                            <span style={{ color: "var(--text-tertiary)" }}>—</span>
-                          ) : (
-                            <div className="space-y-1">
-                              {row.barcodes.map((bc, idx) => (
-                                <div key={`${row.id}-${bc.code}-${idx}`} className="flex items-center gap-2">
-                                  <span className="text-xs min-w-[10rem] truncate" style={{ color: "var(--text-secondary)" }} title={bc.code}>
-                                    {bc.code}
-                                  </span>
-                                  <input
-                                    type="number"
-                                    min={0}
-                                    step={0.01}
-                                    value={d?.barcodePriceStrs?.[idx] ?? ""}
-                                    onChange={(e) =>
-                                      setPriceDraft((prev) => {
-                                        const cur = prev[row.id] ?? {
-                                          priceStr: Number.isFinite(row.price) ? String(row.price) : "",
-                                          priceFrom: !!row.priceFrom,
-                                          barcodePriceStrs: (row.barcodes ?? []).map((b) => (b.price == null ? "" : String(b.price))),
-                                        };
-                                        const nextBarcodePriceStrs = [...(cur.barcodePriceStrs ?? [])];
-                                        nextBarcodePriceStrs[idx] = e.target.value;
-                                        return {
-                                          ...prev,
-                                          [row.id]: { ...cur, barcodePriceStrs: nextBarcodePriceStrs },
-                                        };
-                                      })
-                                    }
-                                    className="w-full max-w-[7rem] px-2 py-1 rounded-lg text-right tabular-nums"
-                                    style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-primary)" }}
-                                    disabled={priceBulkSaving}
-                                  />
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-            <div
-              className="px-4 py-3 sm:px-5 flex flex-wrap justify-end gap-2 border-t"
-              style={{ borderColor: "var(--border)" }}
-            >
-              <button
-                type="button"
-                disabled={priceBulkSaving}
-                className="px-4 py-2 rounded-lg text-sm font-medium"
-                style={{ border: "1px solid var(--border)", color: "var(--text-primary)" }}
-                onClick={() => setPriceManageGroup(null)}
-              >
-                Отмена
-              </button>
-              <button
-                type="button"
-                disabled={priceBulkSaving}
-                className="px-4 py-2 rounded-lg text-sm font-semibold text-white"
-                style={{ background: "var(--accent)", opacity: priceBulkSaving ? 0.7 : 1 }}
-                onClick={() => void savePriceManage()}
-              >
-                {priceBulkSaving ? "Сохранение…" : "Сохранить изменения"}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
 
       <LensTranspositionDrawer open={transposeOpen} onClose={() => setTransposeOpen(false)} />
     </div>

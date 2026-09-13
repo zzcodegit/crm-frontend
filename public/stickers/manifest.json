@@ -1,0 +1,65 @@
+{
+  "source": "https://github.com/WhatsApp/stickers",
+  "packs": [
+    {
+      "id": "cuppy",
+      "title": "Cuppy",
+      "dir": "cuppy",
+      "stickers": [
+        { "id": "cuppy_smile", "file": "01_Cuppy_smile.webp", "label": "Улыбка" },
+        { "id": "cuppy_lol", "file": "02_Cuppy_lol.webp", "label": "Смех" },
+        { "id": "cuppy_rofl", "file": "03_Cuppy_rofl.webp", "label": "Хохот" },
+        { "id": "cuppy_sad", "file": "04_Cuppy_sad.webp", "label": "Грусть" },
+        { "id": "cuppy_cry", "file": "05_Cuppy_cry.webp", "label": "Плач" },
+        { "id": "cuppy_love", "file": "06_Cuppy_love.webp", "label": "Любовь" },
+        { "id": "cuppy_hate", "file": "07_Cuppy_hate.webp", "label": "Разбитое сердце" },
+        { "id": "cuppy_love_mug", "file": "08_Cuppy_lovewithmug.webp", "label": "Пара чашек" },
+        { "id": "cuppy_love_cookie", "file": "09_Cuppy_lovewithcookie.webp", "label": "Печенье" },
+        { "id": "cuppy_hmm", "file": "10_Cuppy_hmm.webp", "label": "Хм…" },
+        { "id": "cuppy_upset", "file": "11_Cuppy_upset.webp", "label": "Шок" },
+        { "id": "cuppy_angry", "file": "12_Cuppy_angry.webp", "label": "Злость" },
+        { "id": "cuppy_curious", "file": "13_Cuppy_curious.webp", "label": "Вопрос" },
+        { "id": "cuppy_weird", "file": "14_Cuppy_weird.webp", "label": "Радуга" },
+        { "id": "cuppy_bluescreen", "file": "15_Cuppy_bluescreen.webp", "label": "Сбой" },
+        { "id": "cuppy_angry_red", "file": "16_Cuppy_angry.webp", "label": "Ярость" },
+        { "id": "cuppy_tired", "file": "17_Cuppy_tired.webp", "label": "Устал" },
+        { "id": "cuppy_workhard", "file": "18_Cuppy_workhard.webp", "label": "Работа ночью" },
+        { "id": "cuppy_shine", "file": "19_Cuppy_shine.webp", "label": "Звёзды" },
+        { "id": "cuppy_disgusting", "file": "20_Cuppy_disgusting.webp", "label": "Фу" },
+        { "id": "cuppy_hi", "file": "21_Cuppy_hi.webp", "label": "Привет" },
+        { "id": "cuppy_bye", "file": "22_Cuppy_bye.webp", "label": "Пока" },
+        { "id": "cuppy_greentea", "file": "23_Cuppy_greentea.webp", "label": "Чай" },
+        { "id": "cuppy_phone", "file": "24_Cuppy_phone.webp", "label": "Телефон" },
+        { "id": "cuppy_battery", "file": "25_Cuppy_battery.webp", "label": "Батарея" }
+      ]
+    },
+    {
+      "id": "together",
+      "title": "Вместе",
+      "dir": "together",
+      "stickers": [
+        { "id": "tg_love", "file": "01_SendingLove.webp", "label": "Любовь" },
+        { "id": "tg_together", "file": "02_WellDoThisTogether.webp", "label": "Вместе" },
+        { "id": "tg_heart", "file": "03_Heart.webp", "label": "Сердце" },
+        { "id": "tg_highfive", "file": "04_AirHighFive.webp", "label": "Дай пять" },
+        { "id": "tg_video", "file": "05_GroupVideoCalling.webp", "label": "Видеозвонок" },
+        { "id": "tg_connected", "file": "06_StayConnected.webp", "label": "На связи" },
+        { "id": "tg_ok", "file": "07_OK.webp", "label": "Ок" },
+        { "id": "tg_okay", "file": "08_AreYouOK.webp", "label": "Как ты?" },
+        { "id": "tg_home_mug", "file": "09_StayingHomeMug.webp", "label": "Дома" },
+        { "id": "tg_bed", "file": "10_WorkingFromBed.webp", "label": "Из кровати" },
+        { "id": "tg_calm", "file": "11_StayCalm.webp", "label": "Спокойствие" },
+        { "id": "tg_gym", "file": "12_Gymnastics.webp", "label": "Зарядка" },
+        { "id": "tg_check", "file": "13_DoubleChecking.webp", "label": "Проверка" },
+        { "id": "tg_cat", "file": "14_CatOnTheLaptop.webp", "label": "Кот" },
+        { "id": "tg_wfh_f", "file": "15_WorkingFromHomeF.webp", "label": "Удалёнка" },
+        { "id": "tg_wfh_m", "file": "16_WorkingFromHomeM.webp", "label": "Удалёнка 2" },
+        { "id": "tg_wash", "file": "17_WashingHands.webp", "label": "Мытьё рук" },
+        { "id": "tg_face", "file": "18_DontTouchYourFace.webp", "label": "Не трогай лицо" },
+        { "id": "tg_distance", "file": "19_SocialDistancing.webp", "label": "Дистанция" },
+        { "id": "tg_nurse", "file": "20_SuperheroNurse.webp", "label": "Герой" },
+        { "id": "tg_hero", "file": "21_YouAreMyHero.webp", "label": "Ты герой" }
+      ]
+    }
+  ]
+}

@@ -99,6 +99,8 @@ export default function WarehouseForm() {
   const [name, setName] = useState("");
   const [organizationId, setOrganizationId] = useState<number | null>(null);
   const [managerId, setManagerId] = useState<number | null>(null);
+  const [sortOrder, setSortOrder] = useState(0);
+  const [hideInReports, setHideInReports] = useState(false);
   const [organizations, setOrganizations] = useState<OrganizationOption[]>([]);
   const [managers, setManagers] = useState<ManagerOption[]>([]);
   const [dayRows, setDayRows] = useState<DayRow[]>(() => defaultDayRows());
@@ -122,6 +124,8 @@ export default function WarehouseForm() {
           setName(w.name);
           setOrganizationId(w.organization_id ?? null);
           setManagerId(w.manager_id ?? null);
+          setSortOrder(Number.isFinite(w.sort_order as number) ? Number(w.sort_order) : 0);
+          setHideInReports(!!w.hide_in_reports);
           const oh = w.opening_hours;
           setDayRows(daysFromWeekly(oh?.weekly));
           setHolidayRows(holidaysFromApi(oh?.holidays));
@@ -178,7 +182,9 @@ export default function WarehouseForm() {
           name: trimmed,
           organization_id: organizationId,
           manager_id: managerId,
+          sort_order: sortOrder,
           opening_hours: opening,
+          hide_in_reports: hideInReports,
         });
         navigate("/settings/references/warehouses");
       } else {
@@ -186,7 +192,9 @@ export default function WarehouseForm() {
           name: trimmed,
           organization_id: organizationId,
           manager_id: managerId,
+          sort_order: sortOrder,
           opening_hours: opening,
+          hide_in_reports: hideInReports,
         });
         navigate("/settings/references/warehouses");
       }
@@ -319,6 +327,22 @@ export default function WarehouseForm() {
         </div>
         <div className="mb-6">
           <label className="block text-sm font-medium mb-2" style={{ color: "var(--text-secondary)" }}>
+            Сортировка
+          </label>
+          <input
+            type="number"
+            value={Number.isFinite(sortOrder) ? sortOrder : 0}
+            onChange={(e) => setSortOrder(Number(e.target.value) || 0)}
+            placeholder="0"
+            className="w-full px-4 py-3 rounded-xl border transition-colors"
+            style={{ backgroundColor: "var(--bg-primary)", borderColor: "var(--border)", color: "var(--text-primary)" }}
+          />
+          <p className="text-xs mt-1" style={{ color: "var(--text-tertiary)" }}>
+            Меньше число — выше в списке (график работ, отчёты).
+          </p>
+        </div>
+        <div className="mb-6">
+          <label className="block text-sm font-medium mb-2" style={{ color: "var(--text-secondary)" }}>
             Организация
           </label>
           <select
@@ -355,6 +379,25 @@ export default function WarehouseForm() {
           <p className="text-xs mt-1" style={{ color: "var(--text-tertiary)" }}>
             При обмене с 1С менеджер заполняется автоматически из warehouse_manager
           </p>
+        </div>
+
+        <div className="mb-6">
+          <label className="flex items-start gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={hideInReports}
+              onChange={(e) => setHideInReports(e.target.checked)}
+              className="mt-1 rounded"
+            />
+            <span>
+              <span className="block text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+                Не показывать в отчётах
+              </span>
+              <span className="block text-xs mt-1 leading-relaxed" style={{ color: "var(--text-tertiary)" }}>
+                Точка скрыта в отчётах, в управлении графиком работ и в блоке графика на главной.
+              </span>
+            </span>
+          </label>
         </div>
 
         <div
