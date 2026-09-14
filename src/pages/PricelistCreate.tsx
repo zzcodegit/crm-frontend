@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo } from "react";
-import { Link, useNavigate, useLocation } from "react-router-dom";
+import { Link, useNavigate, useLocation, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { pricelistBasePathFromPathname } from "../utils/pricelistRoutes";
+import { isAdminPricelistFolder } from "../utils/pricelistAdmin";
 import PricelistRxDescriptionEditor from "../components/PricelistRxDescriptionEditor";
 import { parsePriceFromText, priceFromFromText, formatPriceInputValue } from "../utils/pricelistPrice";
 import type { ManufacturerItem, FeatureItem, CustomFieldItem } from "../api";
@@ -311,9 +312,46 @@ function normalizeMultiSelectBlocks(v: unknown): string[] {
 }
 
 
-type BarcodeRow = { code: string; price: string; description: string };
+type BarcodeRow = {
+  code: string;
+  price: string;
+  description: string;
+  sph: string;
+  cyl: string;
+  diameters: string;
+};
 
 type BarcodeGroupState = { id: string; name: string; rows: BarcodeRow[] };
+
+const emptyBarcodeRow = (): BarcodeRow => ({
+  code: "",
+  price: "",
+  description: "",
+  sph: "",
+  cyl: "",
+  diameters: "",
+});
+
+const barcodeRowFromApi = (b: {
+  code?: string;
+  price?: number | null;
+  description?: string | null;
+  sph?: string | null;
+  cyl?: string | null;
+  diameters?: string | null;
+} | string): BarcodeRow => {
+  if (typeof b === "string") {
+    return { ...emptyBarcodeRow(), code: b };
+  }
+  return {
+    code: b.code || "",
+    price: b.price != null ? String(b.price) : "",
+    description: b.description ? String(b.description) : "",
+    sph: b.sph ? String(b.sph) : "",
+    cyl: b.cyl ? String(b.cyl) : "",
+    diameters: b.diameters ? String(b.diameters) : "",
+  };
+};
 
 const newBarcodeGroupId = () => `bg-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 
@@ -328,7 +366,7 @@ function splitClipboardLine(line: string): string[] {
   return [raw.trim()];
 }
 
-/** Разбор вставки из Excel/таблицы: кол1=ШК, кол2=цена, кол3+=описание. */
+/** Разбор вставки: ШК | цена | описание | сфера | цилиндр | диаметр */
 function parseBarcodesFromClipboard(text: string): BarcodeRow[] {
   const lines = String(text || "")
     .replace(/^\uFEFF/, "")
@@ -346,9 +384,14 @@ function parseBarcodesFromClipboard(text: string): BarcodeRow[] {
     const key = code0.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    const price = (cols[1] || "").trim();
-    const description = cols.length > 2 ? cols.slice(2).join(" ").trim() : "";
-    out.push({ code: code0, price, description });
+    out.push({
+      code: code0,
+      price: (cols[1] || "").trim(),
+      description: (cols[2] || "").trim(),
+      sph: (cols[3] || "").trim(),
+      cyl: (cols[4] || "").trim(),
+      diameters: (cols[5] || "").trim(),
+    });
   }
   return out;
 }
@@ -358,7 +401,13 @@ function mergeBarcodeRows(
   incoming: BarcodeRow[],
 ): { rows: BarcodeRow[]; added: number; skipped: number } {
   const kept = existing.filter(
-    (r) => (r.code || "").trim() || (r.price || "").trim() || (r.description || "").trim(),
+    (r) =>
+      (r.code || "").trim() ||
+      (r.price || "").trim() ||
+      (r.description || "").trim() ||
+      (r.sph || "").trim() ||
+      (r.cyl || "").trim() ||
+      (r.diameters || "").trim(),
   );
   const seen = new Set(kept.map((r) => r.code.trim().toLowerCase()).filter(Boolean));
   let added = 0;
@@ -372,10 +421,17 @@ function mergeBarcodeRows(
       continue;
     }
     seen.add(key);
-    next.push({ code: row.code.trim(), price: row.price.trim(), description: row.description.trim() });
+    next.push({
+      code: row.code.trim(),
+      price: row.price.trim(),
+      description: row.description.trim(),
+      sph: row.sph.trim(),
+      cyl: row.cyl.trim(),
+      diameters: row.diameters.trim(),
+    });
     added += 1;
   }
-  if (next.length === 0) next.push({ code: "", price: "", description: "" });
+  if (next.length === 0) next.push(emptyBarcodeRow());
   return { rows: next, added, skipped };
 }
 
@@ -470,7 +526,7 @@ function BarcodeRows({
     const next = rows.map((r, i) => (i === index ? { ...r, [field]: value } : r));
     onChange(next);
   };
-  const addRow = () => onChange([...rows, { code: "", price: "", description: "" }]);
+  const addRow = () => onChange([...rows, emptyBarcodeRow()]);
   const removeRow = (index: number) => onChange(rows.filter((_, i) => i !== index));
 
   const applyParsed = (parsed: BarcodeRow[]) => {
@@ -497,8 +553,12 @@ function BarcodeRows({
     applyParsed(parsed);
   };
 
-  const list = rows.length === 0 ? [{ code: "", price: "", description: "" }] : rows;
+  const list = rows.length === 0 ? [emptyBarcodeRow()] : rows;
   const previewCount = pasteText.trim() ? parseBarcodesFromClipboard(pasteText).length : 0;
+  const rowHasContent = (r: BarcodeRow) =>
+    Boolean(
+      r.code || r.price || r.description || r.sph || r.cyl || r.diameters,
+    );
 
   return (
     <div>
@@ -509,59 +569,106 @@ function BarcodeRows({
       ) : null}
       <div className="space-y-3">
         {list.map((row, i) => (
-          <div key={i} className="flex flex-wrap gap-2 items-end">
-            <div className="flex-1 min-w-[140px]">
-              <span className="block text-xs mb-1" style={{ color: "var(--text-tertiary)" }}>
-                Штрихкод
-              </span>
-              <input
-                type="text"
-                value={row.code}
-                onChange={(e) => setRow(i, "code", e.target.value)}
-                onPaste={(e) => onCodePaste(i, e)}
-                className="w-full px-3 py-2 rounded-xl text-sm outline-none min-w-0"
-                style={inputStyle}
-                placeholder="Код штрихкода"
-              />
+          <div
+            key={i}
+            className="rounded-xl border p-3 space-y-2"
+            style={{ borderColor: "var(--border)", background: "var(--bg-secondary)" }}
+          >
+            <div className="flex flex-wrap gap-2 items-end">
+              <div className="flex-1 min-w-[140px]">
+                <span className="block text-xs mb-1" style={{ color: "var(--text-tertiary)" }}>
+                  Штрихкод
+                </span>
+                <input
+                  type="text"
+                  value={row.code}
+                  onChange={(e) => setRow(i, "code", e.target.value)}
+                  onPaste={(e) => onCodePaste(i, e)}
+                  className="w-full px-3 py-2 rounded-xl text-sm outline-none min-w-0"
+                  style={inputStyle}
+                  placeholder="Код штрихкода"
+                />
+              </div>
+              <div className="w-28">
+                <span className="block text-xs mb-1" style={{ color: "var(--text-tertiary)" }}>
+                  Цена (₽)
+                </span>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={row.price}
+                  onChange={(e) => setRow(i, "price", e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl text-sm outline-none min-w-0"
+                  style={inputStyle}
+                  placeholder="—"
+                />
+              </div>
+              <div className="flex-1 min-w-[180px]">
+                <span className="block text-xs mb-1" style={{ color: "var(--text-tertiary)" }}>
+                  Описание
+                </span>
+                <input
+                  type="text"
+                  value={row.description}
+                  onChange={(e) => setRow(i, "description", e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl text-sm outline-none min-w-0"
+                  style={inputStyle}
+                  placeholder="Описание"
+                />
+              </div>
+              {(list.length > 1 || rowHasContent(list[0]!)) && (
+                <button
+                  type="button"
+                  onClick={() => removeRow(i)}
+                  className="px-2 py-2 rounded-xl text-sm shrink-0"
+                  style={{ color: "var(--text-secondary)" }}
+                  title="Удалить"
+                >
+                  −
+                </button>
+              )}
             </div>
-            <div className="w-28">
-              <span className="block text-xs mb-1" style={{ color: "var(--text-tertiary)" }}>
-                Цена (₽)
-              </span>
-              <input
-                type="text"
-                inputMode="decimal"
-                value={row.price}
-                onChange={(e) => setRow(i, "price", e.target.value)}
-                className="w-full px-3 py-2 rounded-xl text-sm outline-none min-w-0"
-                style={inputStyle}
-                placeholder="—"
-              />
+            <div className="flex flex-wrap gap-2 items-end">
+              <div className="w-28">
+                <span className="block text-xs mb-1" style={{ color: "var(--text-tertiary)" }}>
+                  Сфера
+                </span>
+                <input
+                  type="text"
+                  value={row.sph}
+                  onChange={(e) => setRow(i, "sph", e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl text-sm outline-none min-w-0"
+                  style={inputStyle}
+                  placeholder="SPH"
+                />
+              </div>
+              <div className="w-28">
+                <span className="block text-xs mb-1" style={{ color: "var(--text-tertiary)" }}>
+                  Цилиндр
+                </span>
+                <input
+                  type="text"
+                  value={row.cyl}
+                  onChange={(e) => setRow(i, "cyl", e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl text-sm outline-none min-w-0"
+                  style={inputStyle}
+                  placeholder="CYL"
+                />
+              </div>
+              <div className="w-28">
+                <span className="block text-xs mb-1" style={{ color: "var(--text-tertiary)" }}>
+                  Диаметр
+                </span>
+                <input
+                  type="text"
+                  value={row.diameters}
+                  onChange={(e) => setRow(i, "diameters", e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl text-sm outline-none min-w-0"
+                  style={inputStyle}
+                  placeholder="Ø"
+                />
+              </div>
             </div>
-            <div className="flex-1 min-w-[180px]">
-              <span className="block text-xs mb-1" style={{ color: "var(--text-tertiary)" }}>
-                Описание
-              </span>
-              <input
-                type="text"
-                value={row.description}
-                onChange={(e) => setRow(i, "description", e.target.value)}
-                className="w-full px-3 py-2 rounded-xl text-sm outline-none min-w-0"
-                style={inputStyle}
-                placeholder="Описание"
-              />
-            </div>
-            {(list.length > 1 || list[0]?.code || list[0]?.price || list[0]?.description) && (
-              <button
-                type="button"
-                onClick={() => removeRow(i)}
-                className="px-2 py-2 rounded-xl text-sm shrink-0"
-                style={{ color: "var(--text-secondary)" }}
-                title="Удалить"
-              >
-                −
-              </button>
-            )}
           </div>
         ))}
         <div className="flex flex-wrap gap-3 items-center">
@@ -589,14 +696,14 @@ function BarcodeRows({
             style={{ border: "1px solid var(--border)", background: "var(--bg-primary)" }}
           >
             <p className="text-xs" style={{ color: "var(--text-secondary)" }}>
-              Скопируйте из Excel столбцы: <strong>штрихкод</strong>, цена (необяз.), описание (необяз.) — и вставьте
-              ниже (Ctrl+V).
+              Скопируйте из Excel столбцы: <strong>штрихкод</strong>, цена, описание, сфера, цилиндр, диаметр
+              (всё кроме штрихкода необязательно) — и вставьте ниже (Ctrl+V).
             </p>
             <textarea
               value={pasteText}
               onChange={(e) => setPasteText(e.target.value)}
               rows={8}
-              placeholder={"4601234567890\t1500\tSPH -1.00\n4601234567891\t1600\tSPH -1.25"}
+              placeholder={"4601234567890\t1500\t\t-1.00\t-0.75\t70\n4601234567891\t1600\t\t-1.25\t\t70"}
               className="w-full px-3 py-2 rounded-xl text-sm outline-none font-mono"
               style={inputStyle}
             />
@@ -650,7 +757,7 @@ function BarcodeGroupsEditor({
     onChange(groups.map((g) => (g.id === gid ? { ...g, rows } : g)));
   };
   const addGroup = () => {
-    onChange([...groups, { id: newBarcodeGroupId(), name: "", rows: [{ code: "", price: "", description: "" }] }]);
+    onChange([...groups, { id: newBarcodeGroupId(), name: "", rows: [emptyBarcodeRow()] }]);
   };
   const removeGroup = (gid: string) => {
     if (groups.length <= 1) return;
@@ -664,7 +771,7 @@ function BarcodeGroupsEditor({
         </label>
         <p className="text-xs mt-0.5" style={{ color: "var(--text-tertiary)" }}>
           Один общий список или несколько групп с названиями. Пустое название — без заголовка на карточке. Можно вставить
-          много строк из Excel (штрихкод / цена / описание).
+          много строк из Excel (штрихкод / цена / описание / сфера / цилиндр / диаметр).
         </p>
       </div>
       {groups.map((g, idx) => (
@@ -720,6 +827,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 export default function PricelistCreate({ editId }: { editId?: number }) {
   const navigate = useNavigate();
   const location = useLocation();
+  const [searchParams] = useSearchParams();
   const basePath = pricelistBasePathFromPathname(location.pathname);
   const catalog = basePath === "/pricelist-rx" ? "rx" : basePath === "/pricelist-mkl" ? "mkl" : "warehouse";
   const plApi = catalog === "rx" ? api.pricelistRx : catalog === "mkl" ? api.pricelistMkl : api.pricelist;
@@ -727,6 +835,7 @@ export default function PricelistCreate({ editId }: { editId?: number }) {
   const plGroups =
     catalog === "rx" ? api.ref.pricelistRxGroups : catalog === "mkl" ? api.ref.pricelistMklGroups : api.ref.pricelistGroups;
   const isEdit = editId != null && Number.isInteger(editId);
+  const presetGroupFromUrl = (searchParams.get("group") || "").trim();
   const [manufacturers, setManufacturers] = useState<ManufacturerItem[]>([]);
   const [features, setFeatures] = useState<FeatureItem[]>([]);
   const [manufacturerId, setManufacturerId] = useState<number | "">("");
@@ -734,7 +843,7 @@ export default function PricelistCreate({ editId }: { editId?: number }) {
   const [description, setDescription] = useState("");
   const [fullDescription, setFullDescription] = useState("");
   const [barcodeGroups, setBarcodeGroups] = useState<BarcodeGroupState[]>([
-    { id: newBarcodeGroupId(), name: "", rows: [{ code: "", price: "", description: "" }] },
+    { id: newBarcodeGroupId(), name: "", rows: [emptyBarcodeRow()] },
   ]);
   const [photoUrls, setPhotoUrls] = useState<string[]>([]);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
@@ -835,7 +944,14 @@ export default function PricelistCreate({ editId }: { editId?: number }) {
         if (!isEdit) {
           if (m.length > 0 && manufacturerId === "") setManufacturerId(m[0].id);
           if (c.length > 0) setCoefficient((prev) => prev || c[0].name);
-          if (g.length > 0) setGroup((prev) => prev || g[0].name);
+          const preferred =
+            presetGroupFromUrl && g.some((x) => x.name === presetGroupFromUrl)
+              ? presetGroupFromUrl
+              : g[0]?.name || "";
+          if (preferred) {
+            setGroup((prev) => prev || preferred);
+            if (isAdminPricelistFolder(preferred)) setAdminOnly(true);
+          }
         }
         return { cFieldsActive };
       });
@@ -854,12 +970,8 @@ export default function PricelistCreate({ editId }: { editId?: number }) {
                 name: sec.name ?? "",
                 rows:
                   sec.items && sec.items.length > 0
-                    ? sec.items.map((b) => ({
-                        code: typeof b === "string" ? b : b.code,
-                        price: typeof b === "object" && b != null && "price" in b && b.price != null ? String(b.price) : "",
-                        description: typeof b === "object" && b != null && b.description ? String(b.description) : "",
-                      }))
-                    : [{ code: "", price: "", description: "" }],
+                    ? sec.items.map((b) => barcodeRowFromApi(b))
+                    : [emptyBarcodeRow()],
               }))
             );
           } else {
@@ -869,14 +981,10 @@ export default function PricelistCreate({ editId }: { editId?: number }) {
                 name: "",
                 rows:
                   item.barcodes && item.barcodes.length
-                    ? item.barcodes.map((b) => ({
-                        code: typeof b === "string" ? b : b.code,
-                        price: typeof b === "object" && b != null && "price" in b && b.price != null ? String(b.price) : "",
-                        description: typeof b === "object" && b != null && b.description ? String(b.description) : "",
-                      }))
+                    ? item.barcodes.map((b) => barcodeRowFromApi(b))
                     : item.barcode
-                      ? [{ code: item.barcode, price: "", description: "" }]
-                      : [{ code: "", price: "", description: "" }],
+                      ? [barcodeRowFromApi(item.barcode)]
+                      : [emptyBarcodeRow()],
               },
             ]);
           }
@@ -1204,6 +1312,9 @@ export default function PricelistCreate({ editId }: { editId?: number }) {
                   code: r.code.trim(),
                   price: !Number.isNaN(priceNum) ? priceNum : undefined,
                   description: r.description.trim() || undefined,
+                  sph: r.sph.trim() || undefined,
+                  cyl: r.cyl.trim() || undefined,
+                  diameters: r.diameters.trim() || undefined,
                 };
               });
             return { name: g.name.trim() || null, items };
@@ -1885,7 +1996,11 @@ export default function PricelistCreate({ editId }: { editId?: number }) {
             <div className="flex flex-wrap gap-2 items-end">
               <select
                 value={group}
-                onChange={(e) => setGroup(e.target.value)}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setGroup(next);
+                  if (isAdminPricelistFolder(next)) setAdminOnly(true);
+                }}
                 className="flex-1 min-w-[100px] px-3 py-2.5 rounded-xl text-sm outline-none"
                 style={inputStyle}
               >

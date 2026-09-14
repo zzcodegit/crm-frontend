@@ -3,6 +3,7 @@ import { Link, useSearchParams, useLocation, useNavigate } from "react-router-do
 import { api } from "../api";
 import { parsePriceFromText, priceFromFromText, formatPricelistPriceRub } from "../utils/pricelistPrice";
 import { pricelistPricesPath, type PricelistBasePath } from "../utils/pricelistRoutes";
+import { ADMIN_PRICELIST_FOLDER, isAdminPricelistFolder } from "../utils/pricelistAdmin";
 import { exportPricelistToXlsx, type PricelistExportCatalog } from "../utils/pricelistExportXlsx";
 import { useAuth } from "../contexts/AuthContext";
 import type { ManufacturerItem, PricelistGroupItem } from "../api";
@@ -330,17 +331,30 @@ export default function Pricelist({
   const searchQuery = searchParams.get("q") ?? "";
 
   const visibleGroupsList = useMemo(() => {
-    if (catalog !== "rx" || isAdmin) return groupsList;
-    return groupsList.filter((g) => !g.admin_only);
-  }, [groupsList, catalog, isAdmin]);
+    // Песочница «Прайс для админа» не в обычном списке папок (вход через /pricelist-admin).
+    const base = groupsList.filter((g) => !g.admin_only || isAdminPricelistFolder(g.name));
+    if (groupFilter === ADMIN_PRICELIST_FOLDER) {
+      return groupsList.filter((g) => isAdminPricelistFolder(g.name) || !g.admin_only);
+    }
+    return base.filter((g) => !isAdminPricelistFolder(g.name) && !g.admin_only);
+  }, [groupsList, groupFilter]);
 
   const groupMetaByName = useMemo(() => {
     const m = new Map<string, PricelistGroupItem>();
     for (const g of visibleGroupsList) m.set(g.name, g);
+    // Чтобы метаданные песочницы работали при прямом заходе по URL
+    for (const g of groupsList) {
+      if (isAdminPricelistFolder(g.name)) m.set(g.name, g);
+    }
     return m;
-  }, [visibleGroupsList]);
+  }, [visibleGroupsList, groupsList]);
 
-  const groupOrder = visibleGroupsList.length > 0 ? visibleGroupsList.map((g) => g.name) : GROUP_ORDER_FALLBACK;
+  const groupOrder =
+    groupFilter === ADMIN_PRICELIST_FOLDER
+      ? [ADMIN_PRICELIST_FOLDER]
+      : visibleGroupsList.length > 0
+        ? visibleGroupsList.map((g) => g.name)
+        : GROUP_ORDER_FALLBACK;
   const groupDisplayMap = new Map(
     visibleGroupsList.map((g) => [normalizeGroupName(g.name), g.display_properties_in_list ?? true])
   );
@@ -428,9 +442,14 @@ export default function Pricelist({
   };
 
   const sourceList = useMemo(() => {
-    if (!nativeShell) return pricelistFromApi;
-    return pricelistFromApi.filter((row) => !row.adminOnly);
-  }, [nativeShell, pricelistFromApi]);
+    let rows = pricelistFromApi;
+    if (nativeShell) rows = rows.filter((row) => !row.adminOnly);
+    // В боевом списке не показываем карточки песочницы, только если открыта эта папка
+    if (groupFilter !== ADMIN_PRICELIST_FOLDER) {
+      rows = rows.filter((row) => !isAdminPricelistFolder(row.group));
+    }
+    return rows;
+  }, [nativeShell, pricelistFromApi, groupFilter]);
   const manufacturerNames = useMemo(() => manufacturers.map((m) => m.name), [manufacturers]);
   const manufacturerSet = useMemo(() => new Set(manufacturerNames), [manufacturerNames]);
   const filteredByRefs = useMemo(
@@ -860,7 +879,11 @@ export default function Pricelist({
                 <span>Управление ценами</span>
               </Link>
               <Link
-                to={`${basePath}/new`}
+                to={
+                  groupFilter && groupFilter !== "Все группы"
+                    ? `${basePath}/new?group=${encodeURIComponent(groupFilter)}`
+                    : `${basePath}/new`
+                }
                 className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium text-white transition-opacity hover:opacity-90"
                 style={{ background: "var(--accent)" }}
               >

@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo } from "react";
-import { Link, useParams, useLocation } from "react-router-dom";
+import { Link, useParams, useLocation, useNavigate } from "react-router-dom";
 import { pricelistBasePathFromPathname } from "../utils/pricelistRoutes";
 import { formatPricelistPriceRub } from "../utils/pricelistPrice";
+import { isAdminPricelistFolder } from "../utils/pricelistAdmin";
 import LensTranspositionDrawer from "../components/LensTranspositionDrawer";
 import PricelistMarkdownView from "../components/PricelistMarkdownView";
 
@@ -112,9 +113,13 @@ const MKL_DETAIL_COLUMN_ORDER: MklLensColumnKey[] = ["sph", "cyl", "step", "diam
 export default function PricelistDetail() {
   const { id } = useParams<{ id: string }>();
   const location = useLocation();
+  const navigate = useNavigate();
   const basePath = pricelistBasePathFromPathname(location.pathname);
   const catalog = basePath === "/pricelist-rx" ? "rx" : basePath === "/pricelist-mkl" ? "mkl" : "warehouse";
   const plApi = catalog === "rx" ? api.pricelistRx : catalog === "mkl" ? api.pricelistMkl : api.pricelist;
+  const plGroupsApi =
+    catalog === "rx" ? api.ref.pricelistRxGroups : catalog === "mkl" ? api.ref.pricelistMklGroups : api.ref.pricelistGroups;
+  const plRefApi = catalog === "rx" ? api.ref.pricelistRx : catalog === "mkl" ? api.ref.pricelistMkl : api.ref.pricelist;
   const state = location.state as PricelistDetailLocationState | null;
   const backToPricelistHref =
     state?.fromPricelist != null
@@ -136,16 +141,46 @@ export default function PricelistDetail() {
   const [transposeOpen, setTransposeOpen] = useState(false);
   const [resolvedPhotos, setResolvedPhotos] = useState<string[]>([]);
   const [barcodeQuery, setBarcodeQuery] = useState("");
+  const [publishOpen, setPublishOpen] = useState(false);
+  const [workGroups, setWorkGroups] = useState<{ id: number; name: string }[]>([]);
+  const [publishTargetGroup, setPublishTargetGroup] = useState("");
+  const [publishSaving, setPublishSaving] = useState(false);
+  const [publishError, setPublishError] = useState("");
 
-  type BarcodeDisplayEntry = { code: string; price: number | null; description: string | null };
+  type BarcodeDisplayEntry = {
+    code: string;
+    price: number | null;
+    description: string | null;
+    sph: string | null;
+    cyl: string | null;
+    diameters: string | null;
+  };
   type BarcodeDisplaySection = { name: string | null; entries: BarcodeDisplayEntry[] };
 
   const barcodeDisplaySections = useMemo((): BarcodeDisplaySection[] => {
     if (!item) return [];
-    const normalizeEntry = (b: { code: string; price?: number | null; description?: string | null } | string): BarcodeDisplayEntry =>
+    const normalizeEntry = (
+      b:
+        | {
+            code: string;
+            price?: number | null;
+            description?: string | null;
+            sph?: string | null;
+            cyl?: string | null;
+            diameters?: string | null;
+          }
+        | string
+    ): BarcodeDisplayEntry =>
       typeof b === "string"
-        ? { code: b, price: null, description: null }
-        : { code: b.code, price: b.price ?? null, description: b.description ?? null };
+        ? { code: b, price: null, description: null, sph: null, cyl: null, diameters: null }
+        : {
+            code: b.code,
+            price: b.price ?? null,
+            description: b.description ?? null,
+            sph: b.sph ?? null,
+            cyl: b.cyl ?? null,
+            diameters: b.diameters ?? null,
+          };
     const sections =
       item.barcode_sections && item.barcode_sections.length > 0
         ? item.barcode_sections
@@ -351,19 +386,132 @@ export default function PricelistDetail() {
           {basePath === "/pricelist-rx" ? "К RX" : basePath === "/pricelist-mkl" ? "К прайсу МКЛ" : "К Прайс склад"}
         </Link>
         {isAdmin && id && (
-          <Link
-            to={`${basePath}/${id}/edit`}
-            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium transition-opacity hover:opacity-90"
-            style={{ background: "var(--accent)", color: "#fff" }}
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-            </svg>
-            Редактировать
-          </Link>
+          <div className="flex flex-wrap gap-2">
+            {item && isAdminPricelistFolder(item.group) ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setPublishError("");
+                  setPublishOpen(true);
+                  setPublishTargetGroup("");
+                  plGroupsApi
+                    .list()
+                    .then((list) => {
+                      const work = list.filter((g) => !g.admin_only && !isAdminPricelistFolder(g.name));
+                      setWorkGroups(work.map((g) => ({ id: g.id, name: g.name })));
+                      if (work.length > 0) setPublishTargetGroup(work[0].name);
+                    })
+                    .catch(() => setWorkGroups([]));
+                }}
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium transition-opacity hover:opacity-90"
+                style={{ background: "var(--bg-secondary)", color: "var(--text-primary)", border: "1px solid var(--border)" }}
+              >
+                Показывать в рабочих папках
+              </button>
+            ) : null}
+            <Link
+              to={`${basePath}/${id}/edit`}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium transition-opacity hover:opacity-90"
+              style={{ background: "var(--accent)", color: "#fff" }}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+              </svg>
+              Редактировать
+            </Link>
+          </div>
         )}
       </div>
+
+      {publishOpen && item ? (
+        <div
+          className="fixed inset-0 z-[120] flex items-center justify-center p-3"
+          style={{ background: "rgba(0,0,0,0.45)" }}
+          onClick={() => !publishSaving && setPublishOpen(false)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border p-5 space-y-4"
+            style={{ borderColor: "var(--border)", background: "var(--bg-primary)" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="font-bold" style={{ color: "var(--text-primary)" }}>
+              Показать в рабочих папках
+            </div>
+            <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+              Карточка перейдёт из «Прайс для админа» в выбранную рабочую папку и станет видна всем.
+            </p>
+            <label className="block text-sm">
+              <span style={{ color: "var(--text-secondary)" }}>Рабочая папка</span>
+              <select
+                value={publishTargetGroup}
+                onChange={(e) => setPublishTargetGroup(e.target.value)}
+                className="mt-1 w-full rounded-xl border px-3 py-2.5 text-sm"
+                style={{
+                  borderColor: "var(--border)",
+                  background: "var(--bg-secondary)",
+                  color: "var(--text-primary)",
+                }}
+              >
+                {workGroups.length === 0 ? <option value="">Нет рабочих папок</option> : null}
+                {workGroups.map((g) => (
+                  <option key={g.id} value={g.name}>
+                    {g.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {publishError ? (
+              <p className="text-sm" style={{ color: "var(--error)" }}>
+                {publishError}
+              </p>
+            ) : null}
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={publishSaving}
+                onClick={() => setPublishOpen(false)}
+                className="px-4 py-2 rounded-xl text-sm border"
+                style={{ borderColor: "var(--border)", color: "var(--text-primary)" }}
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                disabled={publishSaving || !publishTargetGroup}
+                onClick={() => {
+                  if (!id || !publishTargetGroup) return;
+                  setPublishSaving(true);
+                  setPublishError("");
+                  plRefApi
+                    .update(Number(id), {
+                      group: publishTargetGroup,
+                      admin_only: false,
+                      publish_mode: "now",
+                    })
+                    .then(() => {
+                      setPublishOpen(false);
+                      navigate(`${basePath}/${id}`, { replace: true });
+                      // reload item
+                      return plApi.get(Number(id));
+                    })
+                    .then((data) => setItem(data))
+                    .catch((err) => {
+                      setPublishError(err instanceof Error ? err.message : "Не удалось опубликовать");
+                    })
+                    .finally(() => setPublishSaving(false));
+                }}
+                className="px-4 py-2 rounded-xl text-sm font-medium text-white disabled:opacity-50"
+                style={{ background: "var(--accent)" }}
+              >
+                {publishSaving ? "Сохранение…" : "Показать"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {lightboxOpen && photos.length > 0 && (
         <ReportImageLightbox gallery={{ urls: photos, index: lightboxIndex }} onClose={closeLightbox} />
@@ -777,11 +925,18 @@ export default function PricelistDetail() {
                                 lineColor="#000000"
                               />
                             </div>
-                            {(b.price != null || b.description) && (
+                            {(b.price != null || b.description || b.sph || b.cyl || b.diameters) && (
                               <div className="flex flex-col gap-1 min-w-0">
                                 {b.price != null && (
                                   <div className="text-xl font-bold tabular-nums" style={{ color: "var(--accent)" }}>
                                     {b.price.toLocaleString("ru-RU")} ₽
+                                  </div>
+                                )}
+                                {(b.sph || b.cyl || b.diameters) && (
+                                  <div className="text-sm flex flex-wrap gap-x-3 gap-y-0.5" style={{ color: "var(--text-secondary)" }}>
+                                    {b.sph ? <span>Сфера: <strong style={{ color: "var(--text-primary)" }}>{b.sph}</strong></span> : null}
+                                    {b.cyl ? <span>Цилиндр: <strong style={{ color: "var(--text-primary)" }}>{b.cyl}</strong></span> : null}
+                                    {b.diameters ? <span>Диаметр: <strong style={{ color: "var(--text-primary)" }}>{b.diameters}</strong></span> : null}
                                   </div>
                                 )}
                                 {b.description && (

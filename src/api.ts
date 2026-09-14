@@ -842,6 +842,8 @@ export interface ReportItem {
 export interface CentralCashPayoutItem {
   id: number;
   created_at: string;
+  /** Дата пополнения баланса YYYY-MM-DD */
+  balance_effective_date: string;
   paid_to_user_id: number;
   paid_to_name: string;
   amount: number;
@@ -1052,6 +1054,24 @@ export interface ManualWithholdingRow {
   closed_at?: string | null;
   closed_by_user_id?: number | null;
   closed_by_name?: string | null;
+  /** false = черновик только в журнале админа; true = видно сотруднику в ЛК/отчёте */
+  published_to_lk?: boolean;
+  published_at?: string | null;
+  published_by_user_id?: number | null;
+  published_by_name?: string | null;
+  /** Сумма погашения в сменных отчётах */
+  taken_in_report?: number;
+  taken_report_id?: number | null;
+  taken_report_at?: string | null;
+  /** Отчёт, выбранный админом в форме («Забрано в отчёте») */
+  linked_report_id?: number | null;
+}
+
+export interface WithholdingReportOption {
+  id: number;
+  at?: string | null;
+  warehouse_name?: string | null;
+  label: string;
 }
 
 export interface PricelistGroupItem {
@@ -1096,9 +1116,18 @@ export interface FeatureItem {
 }
 
 /** Группа штрихкодов с названием (name null — общий список без заголовка) */
+export interface PricelistBarcodeItem {
+  code: string;
+  price?: number | null;
+  description?: string | null;
+  sph?: string | null;
+  cyl?: string | null;
+  diameters?: string | null;
+}
+
 export interface PricelistBarcodeSection {
   name?: string | null;
-  items: { code: string; price?: number | null; description?: string | null }[];
+  items: PricelistBarcodeItem[];
 }
 
 export interface PricelistItemResponse {
@@ -1111,7 +1140,7 @@ export interface PricelistItemResponse {
   description?: string | null;
   full_description?: string | null;
   barcode?: string | null;
-  barcodes?: { code: string; price?: number | null; description?: string | null }[];
+  barcodes?: PricelistBarcodeItem[];
   /** Группы; для старых позиций — одна секция без названия */
   barcode_sections?: PricelistBarcodeSection[];
   photo_url?: string | null;
@@ -2151,6 +2180,10 @@ export const api = {
     /** Строки «Взято» только из отчётов текущего пользователя. */
     takenMySummary: () => request<{ rows: TakenSummaryRow[] }>("/reports/taken/my-summary"),
     withholdingSummary: () => request<{ rows: ManualWithholdingRow[] }>("/reports/withholding/summary"),
+    withholdingReportOptions: (userId: number) =>
+      request<{ rows: WithholdingReportOption[] }>(
+        `/reports/withholding/report-options?user_id=${encodeURIComponent(String(userId))}`
+      ),
     createWithholding: (d: {
       user_id: number;
       amount: number;
@@ -2158,6 +2191,7 @@ export const api = {
       report_month?: string | null;
       reason?: string | null;
       note?: string | null;
+      linked_report_id?: number | null;
     }) => request<ManualWithholdingRow>("/reports/withholding/manual", { method: "POST", body: JSON.stringify(d) }),
     updateWithholding: (
       id: number,
@@ -2168,6 +2202,7 @@ export const api = {
         report_month?: string | null;
         reason?: string | null;
         note?: string | null;
+        linked_report_id?: number | null;
       }
     ) =>
       request<ManualWithholdingRow>(`/reports/withholding/manual/${id}`, {
@@ -2178,6 +2213,13 @@ export const api = {
       request<ManualWithholdingRow>(`/reports/withholding/manual/${id}/close`, { method: "POST" }),
     reopenWithholding: (id: number) =>
       request<ManualWithholdingRow>(`/reports/withholding/manual/${id}/reopen`, { method: "POST" }),
+    publishWithholding: (id: number) =>
+      request<ManualWithholdingRow>(`/reports/withholding/manual/${id}/publish`, { method: "POST" }),
+    publishWithholdingBulk: (ids: number[]) =>
+      request<{ rows: ManualWithholdingRow[] }>("/reports/withholding/manual/publish-bulk", {
+        method: "POST",
+        body: JSON.stringify({ ids }),
+      }),
     deleteWithholding: (id: number) => request<void>(`/reports/withholding/manual/${id}`, { method: "DELETE" }),
     employeeLedger: (userId: number) =>
       request<EmployeeLedgerResponse>(`/reports/debts/employee-ledger?user_id=${encodeURIComponent(String(userId))}`),
@@ -2315,8 +2357,13 @@ export const api = {
   },
   centralCashPayouts: {
     list: () => request<CentralCashPayoutItem[]>("/central-cash-payouts"),
-    create: (d: { paid_to_user_id: number; amount: number; taken_source_id?: number | null; note?: string | null }) =>
-      request<CentralCashPayoutItem>("/central-cash-payouts", { method: "POST", body: JSON.stringify(d) }),
+    create: (d: {
+      paid_to_user_id: number;
+      amount: number;
+      taken_source_id?: number | null;
+      note?: string | null;
+      balance_effective_date?: string | null;
+    }) => request<CentralCashPayoutItem>("/central-cash-payouts", { method: "POST", body: JSON.stringify(d) }),
     update: (
       id: number,
       d: {
@@ -2324,6 +2371,7 @@ export const api = {
         amount?: number | null;
         taken_source_id?: number | null;
         note?: string | null;
+        balance_effective_date?: string | null;
       }
     ) =>
       request<CentralCashPayoutItem>(`/central-cash-payouts/${id}`, {
@@ -2653,8 +2701,8 @@ export const api = {
     pricelistGroups: {
       list: () => request<PricelistGroupItem[]>("/ref/pricelist-groups"),
       get: (id: number) => request<PricelistGroupItem>(`/ref/pricelist-groups/${id}`),
-      create: (d: { name: string; sort_index?: number; display_properties_in_list?: boolean; display_as_tiles?: boolean; tiles_per_page?: number }) => request<PricelistGroupItem>("/ref/pricelist-groups", { method: "POST", body: JSON.stringify(d) }),
-      update: (id: number, d: { name?: string; sort_index?: number; display_properties_in_list?: boolean; display_as_tiles?: boolean; tiles_per_page?: number }) => request<PricelistGroupItem>(`/ref/pricelist-groups/${id}`, { method: "PATCH", body: JSON.stringify(d) }),
+      create: (d: { name: string; sort_index?: number; display_properties_in_list?: boolean; display_as_tiles?: boolean; tiles_per_page?: number; admin_only?: boolean }) => request<PricelistGroupItem>("/ref/pricelist-groups", { method: "POST", body: JSON.stringify(d) }),
+      update: (id: number, d: { name?: string; sort_index?: number; display_properties_in_list?: boolean; display_as_tiles?: boolean; tiles_per_page?: number; admin_only?: boolean }) => request<PricelistGroupItem>(`/ref/pricelist-groups/${id}`, { method: "PATCH", body: JSON.stringify(d) }),
       delete: (id: number) => request(`/ref/pricelist-groups/${id}`, { method: "DELETE" }),
     },
     pricelistRxGroups: {
@@ -2667,8 +2715,8 @@ export const api = {
     pricelistMklGroups: {
       list: () => request<PricelistGroupItem[]>("/ref/pricelist-mkl-groups"),
       get: (id: number) => request<PricelistGroupItem>(`/ref/pricelist-mkl-groups/${id}`),
-      create: (d: { name: string; sort_index?: number; display_properties_in_list?: boolean; display_as_tiles?: boolean; tiles_per_page?: number }) => request<PricelistGroupItem>("/ref/pricelist-mkl-groups", { method: "POST", body: JSON.stringify(d) }),
-      update: (id: number, d: { name?: string; sort_index?: number; display_properties_in_list?: boolean; display_as_tiles?: boolean; tiles_per_page?: number }) => request<PricelistGroupItem>(`/ref/pricelist-mkl-groups/${id}`, { method: "PATCH", body: JSON.stringify(d) }),
+      create: (d: { name: string; sort_index?: number; display_properties_in_list?: boolean; display_as_tiles?: boolean; tiles_per_page?: number; admin_only?: boolean }) => request<PricelistGroupItem>("/ref/pricelist-mkl-groups", { method: "POST", body: JSON.stringify(d) }),
+      update: (id: number, d: { name?: string; sort_index?: number; display_properties_in_list?: boolean; display_as_tiles?: boolean; tiles_per_page?: number; admin_only?: boolean }) => request<PricelistGroupItem>(`/ref/pricelist-mkl-groups/${id}`, { method: "PATCH", body: JSON.stringify(d) }),
       delete: (id: number) => request(`/ref/pricelist-mkl-groups/${id}`, { method: "DELETE" }),
     },
     pricelist: {

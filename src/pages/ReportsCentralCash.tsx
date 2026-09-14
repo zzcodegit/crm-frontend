@@ -10,6 +10,7 @@ import {
 } from "../api";
 
 const BALANCE_EPS = 1e-6;
+const YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 function userLabel(u: UserItem): string {
   const last = (u.last_name || "").trim();
@@ -21,6 +22,10 @@ function userLabel(u: UserItem): string {
 const fmtRub = (n: number) =>
   n.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+function todayYmdMoscow(): string {
+  return new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Moscow" });
+}
+
 function formatDt(iso: string): string {
   try {
     const d = new Date(iso);
@@ -29,6 +34,12 @@ function formatDt(iso: string): string {
   } catch {
     return iso;
   }
+}
+
+function formatYmd(ymd: string | null | undefined): string {
+  if (!ymd || !YMD_RE.test(ymd)) return "—";
+  const [y, m, d] = ymd.split("-");
+  return `${d}.${m}.${y}`;
 }
 
 function parseAmount(raw: string): number | null {
@@ -55,6 +66,7 @@ export default function ReportsCentralCash() {
   const [amount, setAmount] = useState("");
   const [takenSourceId, setTakenSourceId] = useState<number | "">("");
   const [note, setNote] = useState("");
+  const [balanceEffectiveDate, setBalanceEffectiveDate] = useState(() => todayYmdMoscow());
   const [saving, setSaving] = useState(false);
   const [deletingId, setDeletingId] = useState<number | null>(null);
 
@@ -66,6 +78,7 @@ export default function ReportsCentralCash() {
   const [editAmount, setEditAmount] = useState("");
   const [editTakenSourceId, setEditTakenSourceId] = useState<number | "">("");
   const [editNote, setEditNote] = useState("");
+  const [editBalanceEffectiveDate, setEditBalanceEffectiveDate] = useState("");
   const [editError, setEditError] = useState("");
   const [editSaving, setEditSaving] = useState(false);
   const [editBalance, setEditBalance] = useState<EmployeeSalaryBalanceResponse | null>(null);
@@ -149,21 +162,37 @@ export default function ReportsCentralCash() {
 
   const total = useMemo(() => rows.reduce((s, r) => s + r.amount, 0), [rows]);
 
-  /** После новой выписки: учётный баланс + сумма. */
+  const todayYmd = todayYmdMoscow();
+
+  /** После новой выписки: учётный баланс + сумма (только если дата пополнения ≤ сегодня). */
   const projectedBalance = useMemo(() => {
     if (salaryBalance == null) return null;
     const add = parseAmount(amount) ?? 0;
+    if (!YMD_RE.test(balanceEffectiveDate) || balanceEffectiveDate > todayYmd) {
+      return ccPageBalance(salaryBalance);
+    }
     return ccPageBalance(salaryBalance) + add;
-  }, [salaryBalance, amount]);
+  }, [salaryBalance, amount, balanceEffectiveDate, todayYmd]);
+
+  const createDateIsFuture =
+    YMD_RE.test(balanceEffectiveDate) && balanceEffectiveDate > todayYmd;
 
   /** При редактировании той же записи: заменить старую сумму на новую. */
   const editProjectedBalance = useMemo(() => {
     if (editBalance == null || !editRow) return null;
     const next = parseAmount(editAmount) ?? 0;
     const sameUser = Number(editPaidToId) === editRow.paid_to_user_id;
-    const oldAmt = sameUser ? Number(editRow.amount || 0) : 0;
-    return ccPageBalance(editBalance) - oldAmt + next;
-  }, [editBalance, editRow, editAmount, editPaidToId]);
+    const oldDate = editRow.balance_effective_date || "";
+    const oldCounted = !oldDate || oldDate <= todayYmd;
+    const newCounted = YMD_RE.test(editBalanceEffectiveDate) && editBalanceEffectiveDate <= todayYmd;
+    const oldAmt = sameUser && oldCounted ? Number(editRow.amount || 0) : 0;
+    const nextAmt = newCounted ? next : 0;
+    return ccPageBalance(editBalance) - oldAmt + nextAmt;
+  }, [editBalance, editRow, editAmount, editPaidToId, editBalanceEffectiveDate, todayYmd]);
+
+  const editDateIsFuture =
+    YMD_RE.test(editBalanceEffectiveDate) && editBalanceEffectiveDate > todayYmd;
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitError("");
@@ -176,6 +205,8 @@ export default function ReportsCentralCash() {
       setSubmitError("Укажите сумму больше нуля");
       return;
     }
+    const bed = YMD_RE.test(balanceEffectiveDate) ? balanceEffectiveDate : todayYmdMoscow();
+    if (bed !== balanceEffectiveDate) setBalanceEffectiveDate(bed);
     setSaving(true);
     try {
       await api.centralCashPayouts.create({
@@ -183,10 +214,12 @@ export default function ReportsCentralCash() {
         amount: num,
         taken_source_id: takenSourceId === "" ? null : takenSourceId,
         note: note.trim() || null,
+        balance_effective_date: bed,
       });
       setAmount("");
       setTakenSourceId("");
       setNote("");
+      setBalanceEffectiveDate(todayYmdMoscow());
       load();
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : "Не удалось сохранить");
@@ -216,6 +249,11 @@ export default function ReportsCentralCash() {
     setEditAmount(String(Number(r.amount || 0)));
     setEditTakenSourceId(r.taken_source_id == null ? "" : r.taken_source_id);
     setEditNote(r.note || "");
+    setEditBalanceEffectiveDate(
+      r.balance_effective_date && YMD_RE.test(r.balance_effective_date)
+        ? r.balance_effective_date
+        : todayYmdMoscow()
+    );
   };
 
   const closeEdit = () => {
@@ -236,6 +274,10 @@ export default function ReportsCentralCash() {
       setEditError("Укажите сумму больше нуля");
       return;
     }
+    const bed = YMD_RE.test(editBalanceEffectiveDate)
+      ? editBalanceEffectiveDate
+      : todayYmdMoscow();
+    if (bed !== editBalanceEffectiveDate) setEditBalanceEffectiveDate(bed);
     setEditSaving(true);
     try {
       await api.centralCashPayouts.update(editRow.id, {
@@ -243,6 +285,7 @@ export default function ReportsCentralCash() {
         amount: num,
         taken_source_id: editTakenSourceId === "" ? null : editTakenSourceId,
         note: editNote.trim() || null,
+        balance_effective_date: bed,
       });
       closeEdit();
       load();
@@ -258,7 +301,8 @@ export default function ReportsCentralCash() {
     loadingBal: boolean,
     projected: number | null,
     amountRaw: string,
-    afterLabel: string
+    afterLabel: string,
+    futureHint?: string | null
   ) => {
     if (loadingBal && bal == null) {
       return <span style={{ color: "var(--text-tertiary)" }}>Загрузка баланса…</span>;
@@ -312,7 +356,12 @@ export default function ReportsCentralCash() {
             ))}
           </ul>
         ) : null}
-        {projected != null && amtOk ? (
+        {futureHint ? (
+          <span className="text-xs" style={{ color: "var(--text-tertiary)" }}>
+            {futureHint}
+          </span>
+        ) : null}
+        {projected != null && amtOk && !futureHint ? (
           <span style={{ color: "var(--text-secondary)" }}>
             {afterLabel}:{" "}
             <strong
@@ -341,8 +390,8 @@ export default function ReportsCentralCash() {
             Центральная касса
           </h1>
           <p className="text-sm max-w-2xl" style={{ color: "var(--text-secondary)" }}>
-            Учёт выплат сотрудникам из центральной кассы. Записи видны только администраторам и не связаны со сменными
-            отчётами по точкам.
+            Учёт выплат сотрудникам из центральной кассы. Дата пополнения баланса — день, с которого сумма доступна
+            для закрытия долгов «из баланса» (можно указать прошлую или будущую дату).
           </p>
         </div>
         <Link
@@ -398,6 +447,21 @@ export default function ReportsCentralCash() {
           </div>
           <div>
             <label className="block text-xs font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
+              Дата пополнения баланса
+            </label>
+            <input
+              type="date"
+              value={balanceEffectiveDate}
+              onChange={(e) => setBalanceEffectiveDate(e.target.value || todayYmdMoscow())}
+              onBlur={() => {
+                if (!YMD_RE.test(balanceEffectiveDate)) setBalanceEffectiveDate(todayYmdMoscow());
+              }}
+              className="w-full px-3 py-2.5 rounded-xl text-sm border outline-none"
+              style={{ background: "var(--bg-secondary)", borderColor: "var(--border)", color: "var(--text-primary)" }}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
               Как выданы деньги
             </label>
             <select
@@ -448,7 +512,8 @@ export default function ReportsCentralCash() {
               salaryBalanceLoading,
               projectedBalance,
               amount,
-              "После записи выплаты"
+              "После записи выплаты",
+              createDateIsFuture ? `На балансе появится с ${formatYmd(balanceEffectiveDate)}` : null
             )}
           </div>
         ) : null}
@@ -493,7 +558,10 @@ export default function ReportsCentralCash() {
               <thead>
                 <tr style={{ background: "var(--bg-secondary)" }}>
                   <th className="text-left px-4 py-3 font-medium" style={{ color: "var(--text-secondary)" }}>
-                    Дата
+                    Дата пополнения
+                  </th>
+                  <th className="text-left px-4 py-3 font-medium" style={{ color: "var(--text-secondary)" }}>
+                    Записано
                   </th>
                   <th className="text-left px-4 py-3 font-medium" style={{ color: "var(--text-secondary)" }}>
                     Сотрудник
@@ -516,7 +584,10 @@ export default function ReportsCentralCash() {
               <tbody>
                 {rows.map((r) => (
                   <tr key={r.id} className="border-t" style={{ borderColor: "var(--border)" }}>
-                    <td className="px-4 py-3 whitespace-nowrap" style={{ color: "var(--text-primary)" }}>
+                    <td className="px-4 py-3 whitespace-nowrap font-medium" style={{ color: "var(--text-primary)" }}>
+                      {formatYmd(r.balance_effective_date)}
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap text-xs" style={{ color: "var(--text-tertiary)" }}>
                       {formatDt(r.created_at)}
                     </td>
                     <td className="px-4 py-3" style={{ color: "var(--text-primary)" }}>
@@ -643,6 +714,25 @@ export default function ReportsCentralCash() {
                   />
                 </label>
                 <label className="block text-sm">
+                  <span style={{ color: "var(--text-secondary)" }}>Дата пополнения баланса</span>
+                  <input
+                    type="date"
+                    value={editBalanceEffectiveDate}
+                    onChange={(e) => setEditBalanceEffectiveDate(e.target.value || todayYmdMoscow())}
+                    onBlur={() => {
+                      if (!YMD_RE.test(editBalanceEffectiveDate)) {
+                        setEditBalanceEffectiveDate(todayYmdMoscow());
+                      }
+                    }}
+                    className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
+                    style={{
+                      borderColor: "var(--border)",
+                      background: "var(--bg-secondary)",
+                      color: "var(--text-primary)",
+                    }}
+                  />
+                </label>
+                <label className="block text-sm sm:col-span-2">
                   <span style={{ color: "var(--text-secondary)" }}>Как выданы деньги</span>
                   <select
                     value={editTakenSourceId === "" ? "" : String(editTakenSourceId)}
@@ -679,6 +769,9 @@ export default function ReportsCentralCash() {
                   />
                 </label>
               </div>
+              <p className="text-xs" style={{ color: "var(--text-tertiary)" }}>
+                Смена даты пополнения пересчитает баланс и подписи «Баланс / из кассы» в отчётах.
+              </p>
 
               {editPaidToId !== "" ? (
                 <div
@@ -690,7 +783,10 @@ export default function ReportsCentralCash() {
                     editBalanceLoading,
                     editProjectedBalance,
                     editAmount,
-                    "После сохранения"
+                    "После сохранения",
+                    editDateIsFuture
+                      ? `На балансе появится с ${formatYmd(editBalanceEffectiveDate)}`
+                      : null
                   )}
                 </div>
               ) : null}

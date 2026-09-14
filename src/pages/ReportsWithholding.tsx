@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import ReportsSubnav from "../components/ReportsSubnav";
 import { api } from "../api";
-import type { EmployeeSalaryBalanceResponse, ManualWithholdingRow, RefItem } from "../api";
+import type { EmployeeSalaryBalanceResponse, ManualWithholdingRow, RefItem, WithholdingReportOption } from "../api";
 
 const BALANCE_EPS = 1e-6;
 
@@ -37,13 +37,24 @@ function fmtDate(v?: string | null): string {
   return d.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
+/** Календарный день Москвы: 13.05.2026 */
+function fmtMoscowDayDots(v?: string | null): string | null {
+  if (!v) return null;
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return null;
+  const ymd = d.toLocaleDateString("sv-SE", { timeZone: "Europe/Moscow" });
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
+  if (!m) return null;
+  return `${m[3]}.${m[2]}.${m[1]}`;
+}
+
 export default function ReportsWithholding() {
   const [rows, setRows] = useState<ManualWithholdingRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [dateFrom, setDateFrom] = useState(() => monthStartYmdLocal());
   const [dateTo, setDateTo] = useState(() => todayYmdLocal());
-  const [showClosed, setShowClosed] = useState(false);
+  const [showClosed, setShowClosed] = useState(true);
   const [consultants, setConsultants] = useState<{ id: number; last_name: string }[]>([]);
   const [warehouses, setWarehouses] = useState<RefItem[]>([]);
   const [newUserId, setNewUserId] = useState<number | "">("");
@@ -52,10 +63,16 @@ export default function ReportsWithholding() {
   const [newMonth, setNewMonth] = useState("");
   const [newReason, setNewReason] = useState("");
   const [newNote, setNewNote] = useState("");
+  const [newLinkedReportId, setNewLinkedReportId] = useState<number | "">("");
+  const [newReportOptions, setNewReportOptions] = useState<WithholdingReportOption[]>([]);
+  const [newReportsLoading, setNewReportsLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [deleteBusyId, setDeleteBusyId] = useState<number | null>(null);
   const [closeBusyId, setCloseBusyId] = useState<number | null>(null);
+  const [publishBusyId, setPublishBusyId] = useState<number | null>(null);
+  const [publishBulkBusy, setPublishBulkBusy] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(() => new Set());
   const [editRow, setEditRow] = useState<ManualWithholdingRow | null>(null);
   const [editUserId, setEditUserId] = useState<number | "">("");
   const [editAmount, setEditAmount] = useState("");
@@ -63,6 +80,9 @@ export default function ReportsWithholding() {
   const [editMonth, setEditMonth] = useState("");
   const [editReason, setEditReason] = useState("");
   const [editNote, setEditNote] = useState("");
+  const [editLinkedReportId, setEditLinkedReportId] = useState<number | "">("");
+  const [editReportOptions, setEditReportOptions] = useState<WithholdingReportOption[]>([]);
+  const [editReportsLoading, setEditReportsLoading] = useState(false);
   const [editSubmitting, setEditSubmitting] = useState(false);
   const [editError, setEditError] = useState("");
   const [salaryBalance, setSalaryBalance] = useState<EmployeeSalaryBalanceResponse | null>(null);
@@ -89,10 +109,13 @@ export default function ReportsWithholding() {
   useEffect(() => {
     if (newUserId === "") {
       setSalaryBalance(null);
+      setNewReportOptions([]);
+      setNewLinkedReportId("");
       return;
     }
     let cancelled = false;
     setSalaryBalanceLoading(true);
+    setNewReportsLoading(true);
     api.reports
       .employeeSalaryBalance({ userId: Number(newUserId) })
       .then((r) => {
@@ -104,10 +127,58 @@ export default function ReportsWithholding() {
       .finally(() => {
         if (!cancelled) setSalaryBalanceLoading(false);
       });
+    api.reports
+      .withholdingReportOptions(Number(newUserId))
+      .then((r) => {
+        if (cancelled) return;
+        const opts = Array.isArray(r.rows) ? r.rows : [];
+        setNewReportOptions(opts);
+        setNewLinkedReportId((prev) => (prev !== "" && opts.some((o) => o.id === prev) ? prev : ""));
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setNewReportOptions([]);
+          setNewLinkedReportId("");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setNewReportsLoading(false);
+      });
     return () => {
       cancelled = true;
     };
   }, [newUserId, rows]);
+
+  useEffect(() => {
+    if (!editRow || editUserId === "") {
+      setEditReportOptions([]);
+      return;
+    }
+    let cancelled = false;
+    setEditReportsLoading(true);
+    api.reports
+      .withholdingReportOptions(Number(editUserId))
+      .then((r) => {
+        if (cancelled) return;
+        const opts = Array.isArray(r.rows) ? r.rows : [];
+        setEditReportOptions(opts);
+        setEditLinkedReportId((prev) => {
+          if (prev !== "" && opts.some((o) => o.id === prev)) return prev;
+          const fromRow = editRow.linked_report_id ?? editRow.taken_report_id;
+          if (fromRow != null && opts.some((o) => o.id === Number(fromRow))) return Number(fromRow);
+          return "";
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setEditReportOptions([]);
+      })
+      .finally(() => {
+        if (!cancelled) setEditReportsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [editRow, editUserId]);
 
   const projectedBalance = useMemo(() => {
     if (salaryBalance == null) return null;
@@ -138,6 +209,7 @@ export default function ReportsWithholding() {
           r.report_month ?? "",
           String(r.id),
           String(r.amount),
+          r.published_to_lk ? "в лк" : "черновик",
         ]
           .join(" ")
           .toLowerCase()
@@ -147,6 +219,40 @@ export default function ReportsWithholding() {
   }, [rows, search, dateFrom, dateTo, showClosed]);
 
   const totalAmount = useMemo(() => filtered.reduce((s, r) => s + Number(r.amount || 0), 0), [filtered]);
+
+  const draftSelectableIds = useMemo(
+    () => filtered.filter((r) => !r.closed && !r.published_to_lk).map((r) => r.id),
+    [filtered]
+  );
+
+  const selectedDraftCount = useMemo(
+    () => draftSelectableIds.filter((id) => selectedIds.has(id)).length,
+    [draftSelectableIds, selectedIds]
+  );
+
+  const allDraftsSelected =
+    draftSelectableIds.length > 0 && draftSelectableIds.every((id) => selectedIds.has(id));
+
+  const toggleSelected = (id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAllDrafts = () => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allDraftsSelected) {
+        for (const id of draftSelectableIds) next.delete(id);
+      } else {
+        for (const id of draftSelectableIds) next.add(id);
+      }
+      return next;
+    });
+  };
 
   const onCreate = async () => {
     setError("");
@@ -168,11 +274,13 @@ export default function ReportsWithholding() {
         report_month: newMonth.trim() || null,
         reason: newReason.trim() || null,
         note: newNote.trim() || null,
+        linked_report_id: newLinkedReportId === "" ? null : Number(newLinkedReportId),
       });
       setNewAmount("");
       setNewMonth("");
       setNewReason("");
       setNewNote("");
+      setNewLinkedReportId("");
       await loadRows();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не удалось добавить удержание");
@@ -219,6 +327,43 @@ export default function ReportsWithholding() {
     }
   };
 
+  const onPublishRow = async (id: number) => {
+    if (!window.confirm("Отправить удержание в ЛК сотрудника? Он увидит его в сменном отчёте.")) return;
+    setPublishBusyId(id);
+    try {
+      await api.reports.publishWithholding(id);
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      await loadRows();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Не удалось отправить в ЛК");
+    } finally {
+      setPublishBusyId(null);
+    }
+  };
+
+  const onPublishSelected = async () => {
+    const ids = draftSelectableIds.filter((id) => selectedIds.has(id));
+    if (ids.length === 0) {
+      alert("Выберите черновики для отправки в ЛК");
+      return;
+    }
+    if (!window.confirm(`Отправить в ЛК выбранные удержания (${ids.length})?`)) return;
+    setPublishBulkBusy(true);
+    try {
+      await api.reports.publishWithholdingBulk(ids);
+      setSelectedIds(new Set());
+      await loadRows();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Не удалось отправить в ЛК");
+    } finally {
+      setPublishBulkBusy(false);
+    }
+  };
+
   const openEdit = (r: ManualWithholdingRow) => {
     setEditError("");
     if (r.closed) {
@@ -232,6 +377,13 @@ export default function ReportsWithholding() {
     setEditMonth(r.report_month || "");
     setEditReason(r.reason || "");
     setEditNote(r.note || "");
+    setEditLinkedReportId(
+      r.linked_report_id != null && Number(r.linked_report_id) > 0
+        ? Number(r.linked_report_id)
+        : r.taken_report_id != null && Number(r.taken_report_id) > 0
+          ? Number(r.taken_report_id)
+          : ""
+    );
   };
 
   const closeEdit = () => {
@@ -261,6 +413,7 @@ export default function ReportsWithholding() {
         report_month: editMonth.trim() || null,
         reason: editReason.trim() || null,
         note: editNote.trim() || null,
+        linked_report_id: editLinkedReportId === "" ? 0 : Number(editLinkedReportId),
       });
       closeEdit();
       await loadRows();
@@ -279,7 +432,8 @@ export default function ReportsWithholding() {
             Удержание
           </h1>
           <p className="text-sm mt-1 max-w-3xl" style={{ color: "var(--text-secondary)" }}>
-            Ручное добавление удержаний по сотрудникам. Погашаются в сменном отчёте в блоке «Удержания» (увеличивают наличные в кассе). На баланс ЦК не влияют.
+            Новые удержания сначала черновики — только в этом журнале. После «Отправить в ЛК» сотрудник видит их в
+            сменном отчёте (блок «Удержания»; сумма увеличивает наличные в кассе). На баланс ЦК не влияют.
           </p>
         </div>
         <Link
@@ -363,6 +517,40 @@ export default function ReportsWithholding() {
               style={{ borderColor: "var(--border)", background: "var(--bg-secondary)", color: "var(--text-primary)" }}
             />
           </label>
+          <div className="block text-sm md:col-span-2 lg:col-span-3">
+            <span style={{ color: "var(--text-secondary)" }}>Забрано в отчёте</span>
+            <select
+              value={newLinkedReportId === "" ? "" : String(newLinkedReportId)}
+              onChange={(e) => setNewLinkedReportId(e.target.value === "" ? "" : Number(e.target.value))}
+              disabled={newUserId === "" || newReportsLoading}
+              className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
+              style={{ borderColor: "var(--border)", background: "var(--bg-secondary)", color: "var(--text-primary)" }}
+            >
+              <option value="">
+                {newUserId === ""
+                  ? "Сначала выберите сотрудника"
+                  : newReportsLoading
+                    ? "Загрузка отчётов…"
+                    : "— не указано —"}
+              </option>
+              {newReportOptions.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+            {newLinkedReportId !== "" ? (
+              <div className="mt-1.5 text-xs" style={{ color: "var(--text-secondary)" }}>
+                <Link
+                  to={`/reports/${newLinkedReportId}/edit`}
+                  className="font-medium underline"
+                  style={{ color: "var(--accent)" }}
+                >
+                  Открыть отчёт #{newLinkedReportId}
+                </Link>
+              </div>
+            ) : null}
+          </div>
         </div>
         {newUserId !== "" ? (
           <div
@@ -425,7 +613,7 @@ export default function ReportsWithholding() {
             {error}
           </div>
         ) : null}
-        <div className="mt-3">
+        <div className="mt-3 flex flex-wrap items-center gap-3">
           <button
             type="button"
             disabled={submitting}
@@ -435,6 +623,9 @@ export default function ReportsWithholding() {
           >
             {submitting ? "Сохранение…" : "Добавить удержание"}
           </button>
+          <span className="text-xs" style={{ color: "var(--text-tertiary)" }}>
+            Сохраняется как черновик — в ЛК отправите отдельно
+          </span>
         </div>
       </div>
 
@@ -470,15 +661,32 @@ export default function ReportsWithholding() {
               />
             </label>
           </div>
-          <label className="mt-3 inline-flex items-center gap-2 text-sm select-none">
-            <input type="checkbox" checked={showClosed} onChange={(e) => setShowClosed(e.target.checked)} />
-            <span style={{ color: "var(--text-secondary)" }}>Показывать закрытые</span>
-          </label>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <label className="inline-flex items-center gap-2 text-sm select-none">
+              <input type="checkbox" checked={showClosed} onChange={(e) => setShowClosed(e.target.checked)} />
+              <span style={{ color: "var(--text-secondary)" }}>Показывать закрытые</span>
+            </label>
+            {draftSelectableIds.length > 0 ? (
+              <button
+                type="button"
+                disabled={publishBulkBusy || selectedDraftCount === 0}
+                onClick={() => void onPublishSelected()}
+                className="px-3 py-1.5 rounded-lg text-sm font-medium text-white disabled:opacity-50"
+                style={{ background: "var(--accent)" }}
+              >
+                {publishBulkBusy
+                  ? "Отправка…"
+                  : selectedDraftCount > 0
+                    ? `Отправить в ЛК (${selectedDraftCount})`
+                    : "Отправить в ЛК"}
+              </button>
+            ) : null}
+          </div>
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Поиск: сотрудник, причина, период, сумма…"
+            placeholder="Поиск: сотрудник, причина, период, сумма, черновик…"
             className="mt-3 w-full px-3 py-2 rounded-lg border text-sm"
             style={{ borderColor: "var(--border)", background: "var(--bg-secondary)", color: "var(--text-primary)" }}
           />
@@ -489,12 +697,23 @@ export default function ReportsWithholding() {
           <div className="p-8 text-center" style={{ color: "var(--text-secondary)" }}>Нет данных</div>
         ) : (
           <div className="overflow-auto max-h-[72vh]">
-            <table className="w-full min-w-[980px] text-sm border-collapse">
+            <table className="w-full min-w-[1280px] text-sm border-collapse">
               <thead className="sticky top-0 z-10">
                 <tr style={{ background: "var(--bg-secondary)", borderBottom: "1px solid var(--border)" }}>
+                  <th className="text-left px-3 py-2 w-10">
+                    <input
+                      type="checkbox"
+                      checked={allDraftsSelected}
+                      disabled={draftSelectableIds.length === 0}
+                      onChange={toggleSelectAllDrafts}
+                      aria-label="Выбрать все черновики"
+                    />
+                  </th>
                   <th className="text-left px-3 py-2">Дата</th>
                   <th className="text-left px-3 py-2">Сотрудник</th>
                   <th className="text-right px-3 py-2">Сумма</th>
+                  <th className="text-right px-3 py-2">Взято в отчёте</th>
+                  <th className="text-left px-3 py-2">Отчёт</th>
                   <th className="text-left px-3 py-2">Точка</th>
                   <th className="text-left px-3 py-2">Период</th>
                   <th className="text-left px-3 py-2">Причина</th>
@@ -505,11 +724,53 @@ export default function ReportsWithholding() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((r) => (
+                {filtered.map((r) => {
+                  const isDraft = !r.closed && !r.published_to_lk;
+                  const takenAmt = Number(r.taken_in_report || 0);
+                  const takenDay = fmtMoscowDayDots(r.taken_report_at);
+                  const takenReportId = r.taken_report_id != null && Number(r.taken_report_id) > 0 ? Number(r.taken_report_id) : null;
+                  return (
                   <tr key={r.id} style={{ borderBottom: "1px solid var(--border)" }}>
+                    <td className="px-3 py-2">
+                      {isDraft ? (
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(r.id)}
+                          onChange={() => toggleSelected(r.id)}
+                          aria-label={`Выбрать удержание ${r.id}`}
+                        />
+                      ) : null}
+                    </td>
                     <td className="px-3 py-2">{fmtDate(r.created_at)}</td>
                     <td className="px-3 py-2">{r.user_name}</td>
                     <td className="px-3 py-2 text-right tabular-nums font-medium">{fmtMoney(r.amount)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">
+                      {takenAmt > BALANCE_EPS ? fmtMoney(takenAmt) : "—"}
+                    </td>
+                    <td className="px-3 py-2">
+                      {takenReportId != null && takenDay ? (
+                        <span className="text-xs leading-snug" style={{ color: "var(--text-secondary)" }}>
+                          забрано {takenDay} в отчёте{" "}
+                          <Link
+                            to={`/reports/${takenReportId}/edit`}
+                            className="font-medium underline"
+                            style={{ color: "var(--accent)" }}
+                          >
+                            #{takenReportId}
+                          </Link>
+                        </span>
+                      ) : takenReportId != null ? (
+                        <Link
+                          to={`/reports/${takenReportId}/edit`}
+                          className="text-xs font-medium underline"
+                          style={{ color: "var(--accent)" }}
+                        >
+                          отчёт #{takenReportId}
+                        </Link>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
                     <td className="px-3 py-2">{r.warehouse_name || "—"}</td>
                     <td className="px-3 py-2">{r.report_month || "—"}</td>
                     <td className="px-3 py-2">{r.reason || "—"}</td>
@@ -532,15 +793,47 @@ export default function ReportsWithholding() {
                             </div>
                           ) : null}
                         </div>
+                      ) : r.published_to_lk ? (
+                        <div className="text-xs leading-snug">
+                          <div className="font-semibold" style={{ color: "#16a34a" }}>
+                            В ЛК
+                          </div>
+                          {r.published_at ? (
+                            <div className="mt-0.5 tabular-nums" style={{ color: "var(--text-tertiary)" }}>
+                              {fmtDate(r.published_at)}
+                            </div>
+                          ) : null}
+                          {r.published_by_name ? (
+                            <div className="mt-0.5" style={{ color: "var(--text-tertiary)" }}>
+                              {r.published_by_name}
+                            </div>
+                          ) : null}
+                        </div>
                       ) : (
-                        <span className="text-xs font-semibold" style={{ color: "#16a34a" }}>
-                          Открыто
+                        <span className="text-xs font-semibold" style={{ color: "#ca8a04" }}>
+                          Черновик
                         </span>
                       )}
                     </td>
                     <td className="px-3 py-2">
                       {!r.closed ? (
                         <>
+                          {isDraft ? (
+                            <>
+                              <button
+                                type="button"
+                                disabled={publishBusyId === r.id || publishBulkBusy}
+                                onClick={() => void onPublishRow(r.id)}
+                                className="text-xs font-medium underline disabled:opacity-50"
+                                style={{ color: "var(--accent)" }}
+                              >
+                                {publishBusyId === r.id ? "…" : "Отправить в ЛК"}
+                              </button>
+                              <span className="mx-2" style={{ color: "var(--text-tertiary)" }}>
+                                ·
+                              </span>
+                            </>
+                          ) : null}
                           <button
                             type="button"
                             onClick={() => openEdit(r)}
@@ -592,7 +885,8 @@ export default function ReportsWithholding() {
                       </button>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -696,6 +990,40 @@ export default function ReportsWithholding() {
                     style={{ borderColor: "var(--border)", background: "var(--bg-secondary)", color: "var(--text-primary)" }}
                   />
                 </label>
+                <div className="block text-sm md:col-span-2">
+                  <span style={{ color: "var(--text-secondary)" }}>Забрано в отчёте</span>
+                  <select
+                    value={editLinkedReportId === "" ? "" : String(editLinkedReportId)}
+                    onChange={(e) => setEditLinkedReportId(e.target.value === "" ? "" : Number(e.target.value))}
+                    disabled={editUserId === "" || editReportsLoading}
+                    className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
+                    style={{ borderColor: "var(--border)", background: "var(--bg-secondary)", color: "var(--text-primary)" }}
+                  >
+                    <option value="">
+                      {editUserId === ""
+                        ? "Сначала выберите сотрудника"
+                        : editReportsLoading
+                          ? "Загрузка отчётов…"
+                          : "— не указано —"}
+                    </option>
+                    {editReportOptions.map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                  {editLinkedReportId !== "" ? (
+                    <div className="mt-1.5 text-xs" style={{ color: "var(--text-secondary)" }}>
+                      <Link
+                        to={`/reports/${editLinkedReportId}/edit`}
+                        className="font-medium underline"
+                        style={{ color: "var(--accent)" }}
+                      >
+                        Открыть отчёт #{editLinkedReportId}
+                      </Link>
+                    </div>
+                  ) : null}
+                </div>
               </div>
 
               {editError ? (

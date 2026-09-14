@@ -56,6 +56,7 @@ import ManufacturerForm from "./pages/ManufacturerForm";
 import Features from "./pages/Features";
 import FeatureForm from "./pages/FeatureForm";
 import PricelistGroups from "./pages/PricelistGroups";
+import PricelistAdminHub from "./pages/PricelistAdminHub";
 import PricelistRxGroups from "./pages/PricelistRxGroups";
 import PricelistMklGroups from "./pages/PricelistMklGroups";
 import PricelistGroupForm from "./pages/PricelistGroupForm";
@@ -225,6 +226,7 @@ export default function App() {
           <Route path="pricelist-mkl/prices" element={<AdminOnly><PricelistPriceManage /></AdminOnly>} />
           <Route path="pricelist-mkl/:id/edit" element={<AdminOnly><PricelistEdit /></AdminOnly>} />
           <Route path="pricelist-mkl/:id" element={<PricelistDetail />} />
+          <Route path="pricelist-admin" element={<AdminOnly><PricelistAdminHub /></AdminOnly>} />
           <Route path="info" element={<SectionAllowed section="info"><Info /></SectionAllowed>} />
           <Route path="reports" element={<Reports />} />
           <Route path="reports/expenses" element={<AdminOnly><ReportsExpenses /></AdminOnly>} />

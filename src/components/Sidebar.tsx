@@ -152,6 +152,7 @@ const navItems: {
   { to: "/pricelist", label: "Прайс склад", icon: PricelistIcon, color: "#0066cc", end: true, subItemsKey: "pricelist", sectionKey: "pricelist" },
   { to: "/pricelist-rx", label: "RX", icon: PricelistIcon, color: "#0066cc", end: true, subItemsKey: "pricelist", sectionKey: "pricelistRx" },
   { to: "/pricelist-mkl", label: "Прайс МКЛ", icon: PricelistIcon, color: "#0066cc", end: true, subItemsKey: "pricelist", sectionKey: "pricelistMkl" },
+  { to: "/pricelist-admin", label: "Прайс для админа", icon: PricelistIcon, color: "#0066cc", end: true, adminOnly: true },
   { to: "/info", label: "Информация", icon: InfoIcon, color: "#0066cc", end: true, sectionKey: "info" },
   { to: "/reports", label: "Отчеты", icon: ReportsIcon, color: "#0066cc", end: true, sectionKey: "reports" },
   { to: "/schedule-management", label: "График работ", icon: ScheduleIcon, color: "#0066cc", end: true, sectionKey: "scheduleManagement" },
@@ -419,8 +420,8 @@ export default function Sidebar({
   const groupsByPath = (path: string) => {
     const raw =
       path === "/pricelist" ? pricelistGroupsWarehouse : path === "/pricelist-rx" ? pricelistGroupsRx : pricelistGroupsMkl;
-    if (path === "/pricelist-rx" && !isAdmin) return raw.filter((g) => !g.admin_only);
-    return raw;
+    // Папки admin_only (в т.ч. «Прайс для админа») — только через раздел /pricelist-admin
+    return raw.filter((g) => !g.admin_only);
   };
   const inNativeShell = isNativeAppShell();
   const itemsRawBase = navItems.filter((i) => (!i.adminOnly || isAdmin) && bySectionAccess(i));
